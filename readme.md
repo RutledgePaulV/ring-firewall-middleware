@@ -91,8 +91,8 @@ of expanding cidr ranges into an in-memory set of all IPs in that range. For lar
 this can quickly grow to a large amount of memory (70+ MB).
 
 ring-firewall-middleware simply runs a fast bit manipulation to see if the client ip lies
-within the cidr range. This operation takes just ~1μs regardless of cidr range size and
-requires only a few bytes of memory.
+within the cidr range. This operation takes just 1μs and a few bytes of memory regardless
+of the size of the cidr range.
 
 ---
 
