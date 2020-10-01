@@ -28,7 +28,7 @@ that add themselves to the forwarded headers.
 (def internal-network-only
   (rfm/wrap-allow-ips admin-handler {:allow-list ["10.0.0.0/8"]}))
 
-(jetty/run-jetty vpn-only {:port 3000})
+(jetty/run-jetty internal-network-only {:port 3000})
 
 ```
 
