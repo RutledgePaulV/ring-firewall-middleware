@@ -134,7 +134,7 @@
 
    "
   ([handler]
-   (wrap-allow-ips handler {}))
+   (wrap-deny-ips handler {}))
   ([handler {:keys [deny-list deny-handler]
              :or   {deny-list    private-subnets
                     deny-handler default-deny-handler}}]
