@@ -100,7 +100,7 @@
    any permitted clients as well as any intermediate proxy servers. The default allow-list
    ranges are the entire internal network space as defined by RFC 1918 and RFC 4193.
 
-   deny-list    - cidr ranges collection that, if matched, will result in an allowed request. optionally
+   allow-list    - cidr ranges collection that, if matched, will result in an allowed request. optionally
                   provide a ref type in which case it will be dereferenced before use.
 
    deny-handler - a function of a ring request that returns a ring response in the event of a denied request.
