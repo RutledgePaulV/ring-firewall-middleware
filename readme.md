@@ -14,7 +14,8 @@ clients can be described using IPv4 and IPv6 CIDR ranges.
 ## Usage 
 
 If you don't already understand the security implications of ip firewalling please read the explanations
-below. Your allow-list must encompass the intended client IPs as well as any intermediate reverse proxies.
+below. Your allow-list must encompass the intended client IPs as well as any intermediate reverse proxies
+that add themselves to the forwarded headers.
 
 ```clojure
 
