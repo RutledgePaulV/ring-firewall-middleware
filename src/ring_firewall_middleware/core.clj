@@ -1,8 +1,7 @@
 (ns ring-firewall-middleware.core
   (:require [clojure.string :as strings])
   (:import [java.net InetAddress]
-           [clojure.lang IDeref]
-           [java.nio ByteBuffer]))
+           [clojure.lang IDeref]))
 
 (def rfc1918-private-subnets
   ["10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"])
@@ -116,7 +115,7 @@
      ([request]
       (if (request-matches? request (touch allow-list))
         (handler request)
-        (default-deny-handler request)))
+        (deny-handler request)))
      ([request respond raise]
       (try
         (respond (firewall-handler request))
@@ -143,7 +142,7 @@
      ([request]
       (if-not (request-matches? request (touch deny-list))
         (handler request)
-        (default-deny-handler request)))
+        (deny-handler request)))
      ([request respond raise]
       (try
         (respond (firewall-handler request))
