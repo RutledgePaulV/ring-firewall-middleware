@@ -13,7 +13,7 @@
   (into rfc1918-private-subnets rfc4193-private-subnets))
 
 (def honored-proxy-headers
-  ["x-forwarded-for" "X-Forwarded-For" "true-client-ip" "True-Client-IP"])
+  ["True-Client-IP" "true-client-ip" "X-Forwarded-For" "x-forwarded-for"])
 
 (defn in-cidr-range?
   "Is a given client ip within a given cidr range?"
@@ -26,29 +26,20 @@
             [cidr (int -1)])
           cidr-inet   (InetAddress/getByName cidr-ip)
           client-inet (InetAddress/getByName client-ip)]
-      (if (identical? (class cidr-inet) (class client-inet))
+      (and
+        (identical? (class cidr-inet) (class client-inet))
         (if (neg? cidr-mask)
           (= cidr-inet client-inet)
           (let [cidr-bytes      (.getAddress cidr-inet)
                 client-bytes    (.getAddress client-inet)
                 cidr-mask-bytes (quot cidr-mask (int 8))
                 final-byte      (unchecked-byte (bit-shift-right 0xFF00 (bit-and cidr-mask 0x07)))]
-            (if (reduce #(if (= (aget cidr-bytes %2)
-                                (aget client-bytes %2))
-                           true
-                           (reduced false))
-                        true
-                        (range cidr-mask-bytes))
-              (if-not (= 0 final-byte)
-                (let [cidr-byte   (bit-and (aget cidr-bytes cidr-mask-bytes) final-byte)
-                      client-byte (bit-and (aget client-bytes cidr-mask-bytes) final-byte)]
-                  (= cidr-byte client-byte))
-                true)
-              false)))
-        false))
-    (catch Exception e
-      (.printStackTrace e)
-      false)))
+            (and
+              (reduce #(or (= (aget cidr-bytes %2) (aget client-bytes %2)) (reduced false)) true (range cidr-mask-bytes))
+              (or (zero? final-byte)
+                  (= (bit-and (aget cidr-bytes cidr-mask-bytes) final-byte)
+                     (bit-and (aget client-bytes cidr-mask-bytes) final-byte))))))))
+    (catch Exception e false)))
 
 (defn in-cidr-ranges?
   "Is a given ip address in one of the provided cidr ranges?"
@@ -67,10 +58,12 @@
 
 (defn default-deny-handler
   "Provides a default ring response for users who didn't meet the firewall requirements."
-  [request]
-  {:status  403
-   :headers {"Content-Type" "text/plain"}
-   :body    "Access denied"})
+  ([request]
+   {:status  403
+    :headers {"Content-Type" "text/plain"}
+    :body    "Access denied"})
+  ([request respond raise]
+   (respond (default-deny-handler request))))
 
 (defn get-forwarded-ip-addresses
   "Gets all the forwarded ip addresses from a request."
@@ -111,15 +104,15 @@
   ([handler {:keys [allow-list deny-handler]
              :or   {allow-list   private-subnets
                     deny-handler default-deny-handler}}]
-   (fn firewall-handler
+   (fn allow-ips-handler
      ([request]
       (if (request-matches? request (touch allow-list))
         (handler request)
         (deny-handler request)))
      ([request respond raise]
-      (try
-        (respond (firewall-handler request))
-        (catch Exception e (raise e)))))))
+      (if (request-matches? request (touch allow-list))
+        (handler request respond raise)
+        (deny-handler request respond raise))))))
 
 
 (defn wrap-deny-ips
@@ -138,12 +131,12 @@
   ([handler {:keys [deny-list deny-handler]
              :or   {deny-list    private-subnets
                     deny-handler default-deny-handler}}]
-   (fn firewall-handler
+   (fn deny-ips-handler
      ([request]
       (if-not (request-matches? request (touch deny-list))
         (handler request)
         (deny-handler request)))
      ([request respond raise]
-      (try
-        (respond (firewall-handler request))
-        (catch Exception e (raise e)))))))
+      (if-not (request-matches? request (touch deny-list))
+        (handler request respond raise)
+        (deny-handler request respond raise))))))
