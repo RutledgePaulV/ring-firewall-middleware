@@ -1,7 +1,8 @@
 (ns ring-firewall-middleware.core
   (:require [clojure.string :as strings])
   (:import [java.net InetAddress]
-           [clojure.lang IDeref]))
+           [clojure.lang IDeref]
+           [java.util.concurrent DelayQueue TimeUnit]))
 
 (def rfc1918-private-subnets
   ["10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"])
@@ -140,3 +141,89 @@
       (if-not (request-matches? request (touch deny-list))
         (handler request respond raise)
         (deny-handler request respond raise))))))
+
+(defn get-client-ip [request]
+  (or (first (get-forwarded-ip-addresses request)) (:remote-addr request)))
+
+(defn default-knock-function [request]
+  (or (get-in request [:query-params :knock])
+      (get-in request [:query-params "knock"])))
+
+(defn parameter-knocking
+  "Like port knocking, but for web requests. Make requests in the
+   right order with the right values for the `knock` query parameter
+   to get your ip address added to the allow-list for the endpoint.
+
+   secret-knock - the sequence of values that must be submitted in the
+                  right order to obtain access.
+
+   "
+  ([handler]
+   (parameter-knocking handler {}))
+  ([handler {:keys [secret-knock knock-fun deny-handler]
+             :or   {knock-fun    default-knock-function
+                    deny-handler default-deny-handler}}]
+   (let [permitted  (atom #{})
+         evaluating (atom {})
+         firewalled (wrap-allow-ips handler {:allow-list permitted})]
+     (letfn [(listen-for-knocks [request]
+               (when-some [knock (default-knock-function request)]
+                 (let [ips (into #{(:remote-addr request)} (get-forwarded-ip-addresses request))
+                       new (swap! evaluating update ips
+                                  (fn [knock-thus-far]
+                                    (->> (cons knock (or knock-thus-far ()))
+                                         (take (count secret-knock)))))]
+                   (when (= (get new ips) secret-knock)
+                     (swap! permitted (partial apply conj) ips)
+                     (swap! evaluating dissoc ips)))))]
+       (fn knocking-handler
+         ([request] (listen-for-knocks request) (firewalled request))
+         ([request respond raise] (listen-for-knocks request) (firewalled request respond raise)))))))
+
+
+(defn wrap-ip-ban
+  ([handler] (wrap-ip-ban handler {}))
+  ([handler {:keys [demerits duration deny-handler]
+             :or   {demerits     10
+                    duration     60000
+                    deny-handler default-deny-handler}}]
+   (let [banned          (atom #{})
+         reinstate-queue (DelayQueue.)
+         reinstate-proc  (future
+                           (loop []
+                             (when-some [client-ip (.take reinstate-queue)]
+                               (swap! banned disj client-ip)
+                               (recur))))
+         evaluating      (atom {})
+         firewalled      (wrap-deny-ips handler {:deny-list banned})]
+     (letfn [(rebuke [request]
+               (let [client-ip (get-client-ip request)
+                     updated   (swap! evaluating update client-ip (fnil inc 0))]
+                 (when (<= demerits (get updated client-ip))
+                   (let [[old new] (swap-vals! banned conj client-ip)]
+                     (when (and (not (contains? old client-ip)) (contains? new client-ip))
+                       (swap! evaluating dissoc client-ip)
+                       (.offer reinstate-queue client-ip duration TimeUnit/MILLISECONDS))))))
+             (offensive? [response]
+               (contains? #{401 404} (:status response)))]
+       (fn ip-ban-handler
+         ([request]
+          (try
+            (let [response (firewalled request)]
+              (when (offensive? response)
+                (rebuke request))
+              response)
+            (catch Exception e
+              (rebuke request)
+              (throw e))))
+         ([request respond raise]
+          ([request]
+           (firewalled
+             request
+             (fn [response]
+               (when (offensive? response)
+                 (rebuke request))
+               (respond response))
+             (fn [exception]
+               (rebuke request)
+               (raise exception))))))))))
