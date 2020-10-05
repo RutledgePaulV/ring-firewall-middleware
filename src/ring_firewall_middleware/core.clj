@@ -2,7 +2,8 @@
   (:require [clojure.string :as strings])
   (:import [java.net InetAddress]
            [clojure.lang IDeref]
-           [java.util.concurrent Semaphore]))
+           [java.util.concurrent Semaphore]
+           [com.google.common.util.concurrent Striped]))
 
 (def rfc1918-private-subnets
   ["10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"])
@@ -169,13 +170,11 @@
   ([handler {:keys [max-concurrent ident-fn]
              :or   {max-concurrent 200
                     ident-fn       (constantly :world)}}]
-   (let [table (atom {})]
+   (let [table (Striped/lazyWeakSemaphore 1 max-concurrent)]
      (fn blocking-concurrency-limit-handler
        ([request]
         (let [ident     (ident-fn request)
-              delayed   (delay (Semaphore. (int max-concurrent) true))
-              state     (swap! table update ident #(or % (force delayed)))
-              semaphore ^Semaphore (get state ident)]
+              semaphore ^Semaphore (.get table ident)]
           (try
             (.acquire semaphore)
             (handler request)
@@ -183,9 +182,7 @@
               (.release semaphore)))))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              delayed   (delay (Semaphore. (int max-concurrent) true))
-              state     (swap! table update ident #(or % (force delayed)))
-              semaphore ^Semaphore (get state ident)]
+              semaphore ^Semaphore (.get table ident)]
           (.acquire semaphore)
           (handler request
                    (fn [response]
@@ -212,22 +209,18 @@
              :or   {max-concurrent 200
                     deny-handler   default-deny-rate-limit-handler
                     ident-fn       (constantly :world)}}]
-   (let [table (atom {})]
+   (let [table (Striped/lazyWeakSemaphore 1 max-concurrent)]
      (fn rejecting-concurrency-limit-handler
        ([request]
         (let [ident     (ident-fn request)
-              delayed   (delay (Semaphore. (int max-concurrent) true))
-              state     (swap! table update ident #(or % (force delayed)))
-              semaphore ^Semaphore (get state ident)]
+              semaphore ^Semaphore (.get table ident)]
           (if (.tryAcquire semaphore)
             (try (handler request)
                  (finally (.release semaphore)))
             (deny-handler request))))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              delayed   (delay (Semaphore. (int max-concurrent) true))
-              state     (swap! table update ident #(or % (force delayed)))
-              semaphore ^Semaphore (get state ident)]
+              semaphore ^Semaphore (.get table ident)]
           (if (.tryAcquire semaphore)
             (handler request
                      (fn [response]
