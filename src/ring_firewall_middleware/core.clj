@@ -155,18 +155,20 @@
         (deny-handler request respond raise))))))
 
 
-(defn wrap-blocking-concurrency-limit
+(defn wrap-concurrency-throttle
   "Protect a ring handler against excessive concurrency. New requests
    after the concurrency limit is already saturated will block until
-   a new slot is available.
+   a slot is available.
 
    max-concurrent - the maximum number of requests to be handled concurrently
-   ident-fn       - a function of a request returning an opaque identifier by
-                    which to segment the lock table. defaults to a global
-                    limit (shared by all users).
+   ident-fn       - a function of a request returning an opaque identifier by which to identify the limited
+                    semaphore. defaults to a global limit (shared by all users) but you may set it to
+                    ring-firewall-middleware.core/default-client-ident to implement a per-user limit
+                    instead or else right your own function to set it to some other group of clients
+                    like those representing one (of many) tenants.
    "
   ([handler]
-   (wrap-blocking-concurrency-limit handler {}))
+   (wrap-concurrency-throttle handler {}))
   ([handler {:keys [max-concurrent ident-fn]
              :or   {max-concurrent 200
                     ident-fn       (constantly :world)}}]
@@ -192,19 +194,21 @@
                      (.release semaphore)
                      (raise exception)))))))))
 
-(defn wrap-rejecting-concurrency-limit
+(defn wrap-concurrency-limit
   "Protect a ring handler against excessive concurrency. New requests
    after the concurrency limit is already saturated will receive a
    denied response.
 
    max-concurrent - the maximum number of requests to be handled concurrently
    deny-handler   - a function of a ring request that returns a ring response in the event of a denied request.
-   ident-fn       - a function of a request returning an opaque identifier by
-                    which to segment the lock table. defaults to a global
-                    limit (shared by all users).
+   ident-fn       - a function of a request returning an opaque identifier by which to identify the limited
+                    semaphore. defaults to a global limit (shared by all users) but you may set it to
+                    ring-firewall-middleware.core/default-client-ident to implement a per-user limit
+                    instead or else right your own function to set it to some other group of clients
+                    like those representing one (of many) tenants.
    "
   ([handler]
-   (wrap-rejecting-concurrency-limit handler {}))
+   (wrap-concurrency-limit handler {}))
   ([handler {:keys [max-concurrent deny-handler ident-fn]
              :or   {max-concurrent 200
                     deny-handler   default-deny-rate-limit-handler

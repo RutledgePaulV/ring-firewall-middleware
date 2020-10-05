@@ -43,7 +43,7 @@
 
 (deftest wrap-blocking-concurrency-limit-test
   (let [handler   (fn [req] (Thread/sleep 1000) {:status 200 :body "Response!"})
-        protected (rfm/wrap-blocking-concurrency-limit handler {:max-concurrent 1})
+        protected (rfm/wrap-concurrency-throttle handler {:max-concurrent 1})
         start     (System/currentTimeMillis)
         one       (future (protected {}))
         two       (future (protected {}))]
@@ -54,7 +54,7 @@
 
 (deftest wrap-rejecting-concurrency-limit-test
   (let [handler   (fn [req] (Thread/sleep 1000) {:status 200 :body "Response!"})
-        protected (rfm/wrap-rejecting-concurrency-limit handler {:max-concurrent 1})
+        protected (rfm/wrap-concurrency-limit handler {:max-concurrent 1})
         one       (future (protected {}))
         two       (future (protected {}))
         responses [(deref one) (deref two)]]
