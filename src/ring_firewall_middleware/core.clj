@@ -161,22 +161,22 @@
    a slot is available.
 
    max-concurrent - the maximum number of requests to be handled concurrently
-   ident-fn       - a function of a request returning an opaque identifier by which to identify the limited
+   ident-fn       - a function of a request returning an opaque identifier by which to identify the
                     semaphore. defaults to a global limit (shared by all users) but you may set it to
-                    ring-firewall-middleware.core/default-client-ident to implement a per-user limit
-                    instead or else right your own function to set it to some other group of clients
+                    ring-firewall-middleware.core/default-client-ident to implement a per-ip limit
+                    instead or else write your own function to set it to some other group of clients
                     like those representing one (of many) tenants.
    "
   ([handler]
    (wrap-concurrency-throttle handler {}))
   ([handler {:keys [max-concurrent ident-fn]
-             :or   {max-concurrent 200
+             :or   {max-concurrent 1
                     ident-fn       (constantly :world)}}]
-   (let [table (Striped/lazyWeakSemaphore 1 max-concurrent)]
-     (fn blocking-concurrency-limit-handler
+   (let [stripe (Striped/lazyWeakSemaphore 1 max-concurrent)]
+     (fn concurrency-throttle-handler
        ([request]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get table ident)]
+              semaphore ^Semaphore (.get stripe ident)]
           (try
             (.acquire semaphore)
             (handler request)
@@ -184,7 +184,7 @@
               (.release semaphore)))))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get table ident)]
+              semaphore ^Semaphore (.get stripe ident)]
           (.acquire semaphore)
           (handler request
                    (fn [response]
@@ -201,30 +201,30 @@
 
    max-concurrent - the maximum number of requests to be handled concurrently
    deny-handler   - a function of a ring request that returns a ring response in the event of a denied request.
-   ident-fn       - a function of a request returning an opaque identifier by which to identify the limited
+   ident-fn       - a function of a request returning an opaque identifier by which to identify the
                     semaphore. defaults to a global limit (shared by all users) but you may set it to
-                    ring-firewall-middleware.core/default-client-ident to implement a per-user limit
-                    instead or else right your own function to set it to some other group of clients
+                    ring-firewall-middleware.core/default-client-ident to implement a per-ip limit
+                    instead or else write your own function to set it to some other group of clients
                     like those representing one (of many) tenants.
    "
   ([handler]
    (wrap-concurrency-limit handler {}))
   ([handler {:keys [max-concurrent deny-handler ident-fn]
-             :or   {max-concurrent 200
+             :or   {max-concurrent 1
                     deny-handler   default-deny-rate-limit-handler
                     ident-fn       (constantly :world)}}]
-   (let [table (Striped/lazyWeakSemaphore 1 max-concurrent)]
-     (fn rejecting-concurrency-limit-handler
+   (let [stripe (Striped/lazyWeakSemaphore 1 max-concurrent)]
+     (fn concurrency-limit-handler
        ([request]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get table ident)]
+              semaphore ^Semaphore (.get stripe ident)]
           (if (.tryAcquire semaphore)
             (try (handler request)
                  (finally (.release semaphore)))
             (deny-handler request))))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get table ident)]
+              semaphore ^Semaphore (.get stripe ident)]
           (if (.tryAcquire semaphore)
             (handler request
                      (fn [response]
