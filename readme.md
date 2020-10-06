@@ -5,7 +5,7 @@
 <small>
 <br/><br/><br/><br/>
 A collection of efficient ring middleware for limiting access to your application code 
-based on things like source ip, concurrency, rate, error generating behavior, etc.
+based on things like source ip, concurrency, rate, poor behavior, etc.
 </small>
 <br clear="all" /><br />
 
