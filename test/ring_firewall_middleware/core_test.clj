@@ -40,3 +40,23 @@
                                       :remote-addr "10.20.206.46"}))))
       (is (= 403 (:status (protected {:headers     {"x-forwarded-for" "10.20.205.24,192.10.1.1"}
                                       :remote-addr "10.20.206.46"})))))))
+
+(deftest wrap-blocking-concurrency-limit-test
+  (let [handler   (fn [req] (Thread/sleep 1000) {:status 200 :body "Response!"})
+        protected (rfm/wrap-concurrency-throttle handler {:max-concurrent 1})
+        start     (System/currentTimeMillis)
+        one       (future (protected {}))
+        two       (future (protected {}))]
+    (deref one)
+    (deref two)
+    (is (<= 2000 (- (System/currentTimeMillis) start)))))
+
+
+(deftest wrap-rejecting-concurrency-limit-test
+  (let [handler   (fn [req] (Thread/sleep 1000) {:status 200 :body "Response!"})
+        protected (rfm/wrap-concurrency-limit handler {:max-concurrent 1})
+        one       (future (protected {}))
+        two       (future (protected {}))
+        responses [(deref one) (deref two)]]
+    (is (not-empty (filter #(= 429 (:status %)) responses)))
+    (is (not-empty (filter #(= 200 (:status %)) responses)))))

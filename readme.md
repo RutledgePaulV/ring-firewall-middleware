@@ -4,18 +4,20 @@
 <img src="./docs/ring-of-fire.jpg" title="brisingr" width="300" height="300" align="left" padding="5px"/>
 <small>
 <br/><br/><br/><br/>
-Simple and efficient ring middleware for restricting access to your routes to specific network addresses. Permitted 
-clients can be described using IPv4 and IPv6 CIDR ranges.
+A collection of efficient ring middleware for limiting access to your application code 
+based on things like source ip, concurrency, rate, poor behavior, etc.
 </small>
 <br clear="all" /><br />
 
 ---
 
-## Usage 
+## Source IP Access 
 
-If you don't already understand the security implications of ip firewalling please read the explanations
-below. Your allow-list must encompass the intended client IPs as well as any intermediate reverse proxies
-that add themselves to the forwarded headers.
+If you don't already understand the security implications of ip firewalling please read 
+[understanding source ip based security](#understanding-source-ip-based-security). Your 
+allow-list must encompass the intended client IPs as well as any intermediate reverse 
+proxies that add themselves to the forwarded headers. This middleware supports both IPv4
+and IPv6 ranges.
 
 ```clojure
 
@@ -32,9 +34,63 @@ that add themselves to the forwarded headers.
 
 ```
 
+
+## Concurrency Throttle
+
+You can use concurrency throttling to limit the number of requests that
+simultaneously exercise some section of your app. This is useful if you 
+have any endpoints that are particularly expensive and may cause instability 
+if invoked enough.
+
+It's a "throttle" and not a "limit" because new requests that would exceed the 
+max-concurrency will block until an earlier request completes and then are 
+processed (unless it takes so long that the client decides to stop waiting).
+
+```clojure 
+
+(require '[ring-firewall-middleware.core :as rfm])
+(require '[ring.adapter.jetty :as jetty])
+
+(defn expensive [request]
+  {:status 200 :body "crawl the entire database"})
+  
+(def internal-network-only
+  (rfm/wrap-concurrency-throttle expensive {:max-concurrent 1}))
+  
+(jetty/run-jetty internal-network-only {:port 3000})
+
+```
+
+
+## Concurrency Limit
+
+You can use concurrency limiting to limit the number of requests that
+simultaneously exercise some section of your app. This is useful if you
+have any endpoints that are particularly expensive and may cause instability
+if invoked enough.
+
+It's a "limit" and not a "throttle" because new requests that would exceed the
+max-concurrency receive an error response from the server and will need to be 
+retried by the client at a later time.
+
+```clojure 
+
+(require '[ring-firewall-middleware.core :as rfm])
+(require '[ring.adapter.jetty :as jetty])
+
+(defn expensive [request]
+  {:status 200 :body "crawl the entire database"})
+  
+(def internal-network-only
+  (rfm/wrap-concurrency-limit expensive {:max-concurrent 1}))
+  
+(jetty/run-jetty internal-network-only {:port 3000})
+
+```
+
 ---
 
-## Understanding Security
+## Understanding Source IP Based Security
 
 There is a lot of misinformation on the web about the security of IP firewalling. I will
 attempt to provide some clarity for the typical web developer.

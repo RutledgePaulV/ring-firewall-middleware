@@ -1,7 +1,9 @@
 (ns ring-firewall-middleware.core
   (:require [clojure.string :as strings])
   (:import [java.net InetAddress]
-           [clojure.lang IDeref]))
+           [clojure.lang IDeref]
+           [java.util.concurrent Semaphore]
+           [com.google.common.util.concurrent Striped]))
 
 (def rfc1918-private-subnets
   ["10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"])
@@ -65,6 +67,15 @@
   ([request respond raise]
    (respond (default-deny-handler request))))
 
+(defn default-deny-rate-limit-handler
+  "Provides a default ring response for users who didn't meet the firewall requirements."
+  ([request]
+   {:status  429
+    :headers {"Content-Type" "text/plain"}
+    :body    "Request limit exceeded"})
+  ([request respond raise]
+   (respond (default-deny-rate-limit-handler request))))
+
 (defn get-forwarded-ip-addresses
   "Gets all the forwarded ip addresses from a request."
   [request]
@@ -76,11 +87,13 @@
          (mapcat parse-header)
          (remove strings/blank?))))
 
+(defn default-client-ident [request]
+  (into #{(:remote-addr request)} (get-forwarded-ip-addresses request)))
+
 (defn request-matches?
   "Does the ring request satisfy the access list?"
   [request access-list]
-  (->> (get-forwarded-ip-addresses request)
-       (into #{(:remote-addr request)})
+  (->> (default-client-ident request)
        (every? (partial in-cidr-ranges? access-list))))
 
 
@@ -140,3 +153,84 @@
       (if-not (request-matches? request (touch deny-list))
         (handler request respond raise)
         (deny-handler request respond raise))))))
+
+
+(defn wrap-concurrency-throttle
+  "Protect a ring handler against excessive concurrency. New requests
+   after the concurrency limit is already saturated will block until
+   a slot is available.
+
+   max-concurrent - the maximum number of requests to be handled concurrently
+   ident-fn       - a function of a request returning an opaque identifier by which to identify the
+                    semaphore. defaults to a global limit (shared by all users) but you may set it to
+                    ring-firewall-middleware.core/default-client-ident to implement a per-ip limit
+                    instead or else write your own function to set it to some other group of clients
+                    like those representing one (of many) tenants.
+   "
+  ([handler]
+   (wrap-concurrency-throttle handler {}))
+  ([handler {:keys [max-concurrent ident-fn]
+             :or   {max-concurrent 1
+                    ident-fn       (constantly :world)}}]
+   (let [stripe (Striped/lazyWeakSemaphore 1 max-concurrent)]
+     (fn concurrency-throttle-handler
+       ([request]
+        (let [ident     (ident-fn request)
+              semaphore ^Semaphore (.get stripe ident)]
+          (try
+            (.acquire semaphore)
+            (handler request)
+            (finally
+              (.release semaphore)))))
+       ([request respond raise]
+        (let [ident     (ident-fn request)
+              semaphore ^Semaphore (.get stripe ident)]
+          (.acquire semaphore)
+          (handler request
+                   (fn [response]
+                     (.release semaphore)
+                     (respond response))
+                   (fn [exception]
+                     (.release semaphore)
+                     (raise exception)))))))))
+
+(defn wrap-concurrency-limit
+  "Protect a ring handler against excessive concurrency. New requests
+   after the concurrency limit is already saturated will receive a
+   denied response.
+
+   max-concurrent - the maximum number of requests to be handled concurrently
+   deny-handler   - a function of a ring request that returns a ring response in the event of a denied request.
+   ident-fn       - a function of a request returning an opaque identifier by which to identify the
+                    semaphore. defaults to a global limit (shared by all users) but you may set it to
+                    ring-firewall-middleware.core/default-client-ident to implement a per-ip limit
+                    instead or else write your own function to set it to some other group of clients
+                    like those representing one (of many) tenants.
+   "
+  ([handler]
+   (wrap-concurrency-limit handler {}))
+  ([handler {:keys [max-concurrent deny-handler ident-fn]
+             :or   {max-concurrent 1
+                    deny-handler   default-deny-rate-limit-handler
+                    ident-fn       (constantly :world)}}]
+   (let [stripe (Striped/lazyWeakSemaphore 1 max-concurrent)]
+     (fn concurrency-limit-handler
+       ([request]
+        (let [ident     (ident-fn request)
+              semaphore ^Semaphore (.get stripe ident)]
+          (if (.tryAcquire semaphore)
+            (try (handler request)
+                 (finally (.release semaphore)))
+            (deny-handler request))))
+       ([request respond raise]
+        (let [ident     (ident-fn request)
+              semaphore ^Semaphore (.get stripe ident)]
+          (if (.tryAcquire semaphore)
+            (handler request
+                     (fn [response]
+                       (.release semaphore)
+                       (respond response))
+                     (fn [exception]
+                       (.release semaphore)
+                       (raise exception)))
+            (deny-handler request respond raise))))))))
