@@ -185,7 +185,7 @@
 
    max-concurrent - the maximum number of requests to be handled concurrently
    ident-fn       - a function of a request returning an opaque identifier by which to identify the
-                    semaphore. defaults to a global limit (shared by all users) but you may set it to
+                    semaphore. defaults to a global limit (shared by all clients) but you may set it to
                     ring-firewall-middleware.core/default-client-ident to implement a per-ip limit
                     instead or else write your own function to set it to some other group of clients
                     like those representing one (of many) tenants.
@@ -225,7 +225,7 @@
    max-concurrent - the maximum number of requests to be handled concurrently
    deny-handler   - a function of a ring request that returns a ring response in the event of a denied request.
    ident-fn       - a function of a request returning an opaque identifier by which to identify the
-                    semaphore. defaults to a global limit (shared by all users) but you may set it to
+                    semaphore. defaults to a global limit (shared by all clients) but you may set it to
                     ring-firewall-middleware.core/default-client-ident to implement a per-ip limit
                     instead or else write your own function to set it to some other group of clients
                     like those representing one (of many) tenants.
@@ -257,3 +257,56 @@
                        (.release semaphore)
                        (raise exception)))
             (deny-handler request respond raise))))))))
+
+
+(defn wrap-rate-throttle
+  "Protect a ring handler against excessive calls. New requests
+   that would exceed the rate limit will block until making
+   them would no longer exceed the rate limit.
+
+   max-requests - the maximum number of requests allowed within the time period.
+   period       - the span of the sliding window (in milliseconds) over which requests are counted.
+   ident-fn     - a function of a request returning an opaque identifier by which to identify the
+                  rate limiter. defaults to a global limit (shared by all clients) but you may set it to
+                  ring-firewall-middleware.core/default-client-ident to implement a per-ip limit
+                  instead or else write your own function to set it to some other group of clients
+                  like those representing one (of many) tenants.
+   "
+  ([handler]
+   (wrap-rate-throttle handler {}))
+  ([handler {:keys [max-requests period ident-fn]
+             :or   {max-requests 100
+                    period       60000
+                    ident-fn     (constantly :world)}}]
+   (fn rate-throttle-handler
+     ([requests]
+      )
+     ([request respond raise]
+      ))))
+
+
+(defn wrap-rate-limit
+  "Protect a ring handler against excessive calls. New requests
+   that would exceed the rate limit will receive a denied response.
+
+   max-requests - the maximum number of requests allowed within the time period.
+   deny-handler - a function of a ring request that returns a ring response in the event of a denied request.
+   period       - the span of the sliding window (in milliseconds) over which requests are counted.
+   ident-fn     - a function of a request returning an opaque identifier by which to identify the
+                  rate limiter. defaults to a global limit (shared by all clients) but you may set it to
+                  ring-firewall-middleware.core/default-client-ident to implement a per-ip limit
+                  instead or else write your own function to set it to some other group of clients
+                  like those representing one (of many) tenants.
+   "
+  ([handler]
+   (wrap-rate-throttle handler {}))
+  ([handler {:keys [max-requests period deny-handler ident-fn]
+             :or   {max-requests 100
+                    period       60000
+                    ident-fn     (constantly :world)
+                    deny-handler default-deny-rate-limit-handler}}]
+   (fn rate-throttle-handler
+     ([requests]
+      )
+     ([request respond raise]
+      ))))
