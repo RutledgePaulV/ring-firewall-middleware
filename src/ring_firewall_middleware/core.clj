@@ -5,14 +5,35 @@
            [java.util.concurrent Semaphore]
            [com.google.common.util.concurrent Striped]))
 
-(def rfc1918-private-subnets
+(def public-ipv4-subnets
+  ["0.0.0.0/5" "8.0.0.0/7" "11.0.0.0/8"
+   "12.0.0.0/6" "16.0.0.0/4" "32.0.0.0/3"
+   "64.0.0.0/2" "128.0.0.0/3" "160.0.0.0/5"
+   "168.0.0.0/6" "172.0.0.0/12" "172.32.0.0/11"
+   "172.64.0.0/10" "172.128.0.0/9" "173.0.0.0/8"
+   "174.0.0.0/7" "176.0.0.0/4" "192.0.0.0/9"
+   "192.128.0.0/11" "192.160.0.0/13" "192.169.0.0/16"
+   "192.170.0.0/15" "192.172.0.0/14" "192.176.0.0/12"
+   "192.192.0.0/10" "193.0.0.0/8" "194.0.0.0/7"
+   "196.0.0.0/6" "200.0.0.0/5" "208.0.0.0/4"])
+
+(def public-ipv6-subnets
+  ["0:0:0:0:0:0:0:0/1" "8000:0:0:0:0:0:0:0/2"
+   "c000:0:0:0:0:0:0:0/3" "e000:0:0:0:0:0:0:0/4"
+   "f000:0:0:0:0:0:0:0/5" "f800:0:0:0:0:0:0:0/6"
+   "fe00:0:0:0:0:0:0:0/7"])
+
+(def private-ipv4-subnets
   ["10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"])
 
-(def rfc4193-private-subnets
+(def private-ipv6-subnets
   ["fc00::/7"])
 
 (def private-subnets
-  (into rfc1918-private-subnets rfc4193-private-subnets))
+  (into private-ipv4-subnets private-ipv6-subnets))
+
+(def public-subnets
+  (into public-ipv4-subnets public-ipv6-subnets))
 
 (def honored-proxy-headers
   ["True-Client-IP" "true-client-ip" "X-Forwarded-For" "x-forwarded-for"])
@@ -56,7 +77,7 @@
 (defn public-address?
   "Is this not a private ip address as defined by RFC 1918 or RFC 4193?"
   [ip-address]
-  (not (private-address? ip-address)))
+  (in-cidr-ranges? public-subnets ip-address))
 
 (defn default-deny-handler
   "Provides a default ring response for users who didn't meet the firewall requirements."
@@ -104,7 +125,7 @@
 (defn wrap-allow-ips
   "Protect a ring handler with source ip authentication. Your allow-list ranges must cover
    any permitted clients as well as any intermediate proxy servers. The default allow-list
-   ranges are the entire internal network space as defined by RFC 1918 and RFC 4193.
+   ranges cover the entire internal network space as defined by RFC 1918 and RFC 4193.
 
    allow-list    - cidr ranges collection that, if matched, will result in an allowed request. optionally
                   provide a ref type in which case it will be dereferenced before use.
@@ -130,8 +151,8 @@
 
 (defn wrap-deny-ips
   "Protect a ring handler with source ip authentication. Your deny-list ranges must cover
-   any forbidden clients / proxy servers. The default deny-list ranges are the entire internal
-   network space as defined by RFC 1918 and RFC 4193.
+   any forbidden clients / proxy servers. The default deny-list ranges cover the entire internal
+   public network space.
 
    deny-list    - cidr ranges collection that, if matched, will result in a denied request. optionally
                   provide a ref type in which case it will be dereferenced before use.
@@ -142,7 +163,7 @@
   ([handler]
    (wrap-deny-ips handler {}))
   ([handler {:keys [deny-list deny-handler]
-             :or   {deny-list    private-subnets
+             :or   {deny-list    public-subnets
                     deny-handler default-deny-handler}}]
    (fn deny-ips-handler
      ([request]
