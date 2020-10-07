@@ -1,5 +1,6 @@
 (ns ring-firewall-middleware.core
-  (:require [clojure.string :as strings])
+  (:require [clojure.string :as strings]
+            [ring-firewall-middleware.limiters :as lim])
   (:import [java.net InetAddress]
            [clojure.lang IDeref]
            [java.util.concurrent Semaphore]
@@ -90,14 +91,14 @@
   ([request respond raise]
    (respond (default-deny-handler request))))
 
-(defn default-deny-rate-limit-handler
+(defn default-deny-limit-handler
   "Provides a default ring response for users who didn't meet the firewall requirements."
   ([request]
    {:status  429
     :headers {"Content-Type" "text/plain"}
     :body    "Request limit exceeded"})
   ([request respond raise]
-   (respond (default-deny-rate-limit-handler request))))
+   (respond (default-deny-limit-handler request))))
 
 (defn get-forwarded-ip-addresses
   "Gets all the forwarded ip addresses from a request."
@@ -195,11 +196,11 @@
   ([handler {:keys [max-concurrent ident-fn]
              :or   {max-concurrent 1
                     ident-fn       (constantly :world)}}]
-   (let [stripe (Striped/lazyWeakSemaphore 1 max-concurrent)]
+   (let [stripe (delay (Striped/lazyWeakSemaphore 1 max-concurrent))]
      (fn concurrency-throttle-handler
        ([request]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get stripe ident)]
+              semaphore ^Semaphore (.get (force stripe) ident)]
           (try
             (.acquire semaphore)
             (handler request)
@@ -207,7 +208,7 @@
               (.release semaphore)))))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get stripe ident)]
+              semaphore ^Semaphore (.get (force stripe) ident)]
           (.acquire semaphore)
           (handler request
                    (fn [response]
@@ -234,20 +235,20 @@
    (wrap-concurrency-limit handler {}))
   ([handler {:keys [max-concurrent deny-handler ident-fn]
              :or   {max-concurrent 1
-                    deny-handler   default-deny-rate-limit-handler
+                    deny-handler   default-deny-limit-handler
                     ident-fn       (constantly :world)}}]
-   (let [stripe (Striped/lazyWeakSemaphore 1 max-concurrent)]
+   (let [stripe (delay (Striped/lazyWeakSemaphore 1 max-concurrent))]
      (fn concurrency-limit-handler
        ([request]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get stripe ident)]
+              semaphore ^Semaphore (.get (force stripe) ident)]
           (if (.tryAcquire semaphore)
             (try (handler request)
                  (finally (.release semaphore)))
             (deny-handler request))))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get stripe ident)]
+              semaphore ^Semaphore (.get (force stripe) ident)]
           (if (.tryAcquire semaphore)
             (handler request
                      (fn [response]
@@ -278,11 +279,18 @@
              :or   {max-requests 100
                     period       60000
                     ident-fn     (constantly :world)}}]
-   (fn rate-throttle-handler
-     ([requests]
-      )
-     ([request respond raise]
-      ))))
+   (let [striped (delay (lim/striped-limiter max-requests period))]
+     (fn rate-throttle-handler
+       ([request]
+        (let [ident     (ident-fn request)
+              semaphore ^Semaphore (.get (force striped) ident)]
+          (.acquire semaphore)
+          (handler request)))
+       ([request respond raise]
+        (let [ident     (ident-fn request)
+              semaphore ^Semaphore (.get (force striped) ident)]
+          (.acquire semaphore)
+          (handler request respond raise)))))))
 
 
 (defn wrap-rate-limit
@@ -299,14 +307,23 @@
                   like those representing one (of many) tenants.
    "
   ([handler]
-   (wrap-rate-throttle handler {}))
+   (wrap-rate-limit handler {}))
   ([handler {:keys [max-requests period deny-handler ident-fn]
              :or   {max-requests 100
                     period       60000
                     ident-fn     (constantly :world)
-                    deny-handler default-deny-rate-limit-handler}}]
-   (fn rate-throttle-handler
-     ([requests]
-      )
-     ([request respond raise]
-      ))))
+                    deny-handler default-deny-limit-handler}}]
+   (let [striped (delay (lim/striped-limiter max-requests period))]
+     (fn rate-limit-handler
+       ([request]
+        (let [ident     (ident-fn request)
+              semaphore ^Semaphore (.get (force striped) ident)]
+          (if (.tryAcquire semaphore)
+            (handler request)
+            (deny-handler request))))
+       ([request respond raise]
+        (let [ident     (ident-fn request)
+              semaphore ^Semaphore (.get (force striped) ident)]
+          (if (.tryAcquire semaphore)
+            (handler request respond raise)
+            (deny-handler request respond raise))))))))
