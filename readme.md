@@ -96,8 +96,9 @@ endpoints that are particularly expensive and may cause instability
 or unfairness to other users if invoked frequently enough.
 
 It's a "throttle" and not a "limit" because new requests that would exceed the
-max-requests in a period will block until an earlier request completes and then 
-are processed (unless it takes so long that the client decides to stop waiting).
+max-requests in a period will block until the request can be made without exceeding
+the limit and then be processed (unless it takes so long that the client decided to 
+stop waiting).
 
 ```clojure 
 
