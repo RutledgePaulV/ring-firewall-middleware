@@ -1,17 +1,41 @@
-(ns ring-firewall-middleware.limiters
-  "Implements a leaky bucket rate limiter using semaphores and delay queues."
-  (:import [java.util.concurrent Semaphore DelayQueue TimeUnit Delayed]
-           [com.google.common.base Supplier]
-           [com.google.common.util.concurrent Striped]
-           [clojure.lang IFn]))
+(ns ring-firewall-middleware.impl
+  (:import [clojure.lang ILookup IMeta IFn]
+           [java.lang.ref WeakReference ReferenceQueue]
+           [java.util.concurrent ConcurrentHashMap Semaphore DelayQueue Delayed TimeUnit]
+           [java.util.function Function]))
 
 
-(defn custom-lazy-stripe [min-stripes fun]
-  (let [parameters (into-array Class [Integer/TYPE Supplier])
-        method     (doto (.getDeclaredMethod ^Class Striped "lazy" parameters)
-                     (.setAccessible true))
-        arguments  (into-array Object [(int min-stripes) (reify Supplier (get [this] (fun)))])]
-    (.invoke method nil arguments)))
+(defn ^Function ->function [fun]
+  (if (instance? Function fun)
+    fun
+    (reify Function (apply [this k] (fun k)))))
+
+(defn weakly [queue x metadata]
+  (proxy [WeakReference IMeta] [x queue]
+    (meta [] metadata)))
+
+(defn concurrent-weak-factory [fun]
+  (let [ref-queue (ReferenceQueue.)
+        container (ConcurrentHashMap.)
+        gen       (->function (fn [k] (weakly ref-queue (fun k) {:key k})))]
+    (reify ILookup
+      (valAt [this key]
+        (loop []
+          (when-some [item (.poll ref-queue)]
+            (.remove container (some-> item meta :key))
+            (.clear item)
+            (recur)))
+        (.get ^WeakReference (.computeIfAbsent container key gen)))
+      (valAt [this key not-found]
+        (if-some [v (.valAt this key)] v not-found)))))
+
+(defn weak-semaphore-factory
+  "Returns a lookup table that dynamically allocates and returns
+   semaphores for the same key but removes them from the table
+   after no strong references to the semaphore remain"
+  [permits]
+  (concurrent-weak-factory (fn [k] (Semaphore. (int permits)))))
+
 
 (defonce task-queue
   (DelayQueue.))
@@ -24,7 +48,7 @@
                      (when-some [task (.take task-queue)]
                        (task))
                      (recur)))
-            "ring-firewall-middleware-timer")
+            "ring-firewall-middleware.impl/timer")
       (.setDaemon true)
       (.start))))
 
@@ -70,6 +94,5 @@
       (release)
       semaphore)))
 
-
-(defn striped-limiter [max-requests period]
-  (custom-lazy-stripe 1 #(make-limiter max-requests period)))
+(defn weak-leaky-semaphore-factory [max-requests period]
+  (concurrent-weak-factory (fn [_] (make-limiter max-requests period))))

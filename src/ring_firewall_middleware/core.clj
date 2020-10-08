@@ -1,10 +1,9 @@
 (ns ring-firewall-middleware.core
   (:require [clojure.string :as strings]
-            [ring-firewall-middleware.limiters :as lim])
+            [ring-firewall-middleware.impl :as impl])
   (:import [java.net InetAddress]
            [clojure.lang IDeref]
-           [java.util.concurrent Semaphore]
-           [com.google.common.util.concurrent Striped]))
+           [java.util.concurrent Semaphore]))
 
 (def public-ipv4-subnets
   (sorted-set
@@ -196,11 +195,11 @@
   ([handler {:keys [max-concurrent ident-fn]
              :or   {max-concurrent 1
                     ident-fn       (constantly :world)}}]
-   (let [stripe (delay (Striped/lazyWeakSemaphore 1 max-concurrent))]
+   (let [stripe (impl/weak-semaphore-factory max-concurrent)]
      (fn concurrency-throttle-handler
        ([request]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get (force stripe) ident)]
+              semaphore ^Semaphore (get stripe ident)]
           (try
             (.acquire semaphore)
             (handler request)
@@ -208,7 +207,7 @@
               (.release semaphore)))))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get (force stripe) ident)]
+              semaphore ^Semaphore (get stripe ident)]
           (.acquire semaphore)
           (handler request
                    (fn [response]
@@ -237,18 +236,18 @@
              :or   {max-concurrent 1
                     deny-handler   default-deny-limit-handler
                     ident-fn       (constantly :world)}}]
-   (let [stripe (delay (Striped/lazyWeakSemaphore 1 max-concurrent))]
+   (let [stripe (impl/weak-semaphore-factory max-concurrent)]
      (fn concurrency-limit-handler
        ([request]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get (force stripe) ident)]
+              semaphore ^Semaphore (get stripe ident)]
           (if (.tryAcquire semaphore)
             (try (handler request)
                  (finally (.release semaphore)))
             (deny-handler request))))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get (force stripe) ident)]
+              semaphore ^Semaphore (get stripe ident)]
           (if (.tryAcquire semaphore)
             (handler request
                      (fn [response]
@@ -279,16 +278,16 @@
              :or   {max-requests 100
                     period       60000
                     ident-fn     (constantly :world)}}]
-   (let [striped (delay (lim/striped-limiter max-requests period))]
+   (let [striped (impl/weak-leaky-semaphore-factory max-requests period)]
      (fn rate-throttle-handler
        ([request]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get (force striped) ident)]
+              semaphore ^Semaphore (get striped ident)]
           (.acquire semaphore)
           (handler request)))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get (force striped) ident)]
+              semaphore ^Semaphore (get striped ident)]
           (.acquire semaphore)
           (handler request respond raise)))))))
 
@@ -313,17 +312,17 @@
                     period       60000
                     ident-fn     (constantly :world)
                     deny-handler default-deny-limit-handler}}]
-   (let [striped (delay (lim/striped-limiter max-requests period))]
+   (let [striped (impl/weak-leaky-semaphore-factory max-requests period)]
      (fn rate-limit-handler
        ([request]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get (force striped) ident)]
+              semaphore ^Semaphore (get striped ident)]
           (if (.tryAcquire semaphore)
             (handler request)
             (deny-handler request))))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get (force striped) ident)]
+              semaphore ^Semaphore (get striped ident)]
           (if (.tryAcquire semaphore)
             (handler request respond raise)
             (deny-handler request respond raise))))))))
