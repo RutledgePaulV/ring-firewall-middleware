@@ -5,7 +5,7 @@
 <small>
 <br/><br/><br/><br/>
 A collection of efficient ring middleware for limiting access to your application code 
-based on things like source ip, concurrency, rate, poor behavior, etc.
+based on things like source ip, concurrency, and rate of requests. Uses no dependencies.
 </small>
 <br clear="all" /><br />
 
@@ -54,10 +54,10 @@ processed (unless it takes so long that the client decides to stop waiting).
 (defn expensive [request]
   {:status 200 :body "crawl the entire database"})
   
-(def internal-network-only
+(def controlled-chaos
   (rfm/wrap-concurrency-throttle expensive {:max-concurrent 1}))
   
-(jetty/run-jetty internal-network-only {:port 3000})
+(jetty/run-jetty controlled-chaos {:port 3000})
 
 ```
 
@@ -81,10 +81,63 @@ retried by the client at a later time.
 (defn expensive [request]
   {:status 200 :body "crawl the entire database"})
   
-(def internal-network-only
+(def controlled-chaos
   (rfm/wrap-concurrency-limit expensive {:max-concurrent 1}))
   
-(jetty/run-jetty internal-network-only {:port 3000})
+(jetty/run-jetty controlled-chaos {:port 3000})
+
+```
+
+## Rate Throttle
+
+You can use rate throttling to control the number of requests that exercise 
+portions of your app over a period of time. This is useful if you have 
+endpoints that are particularly expensive and may cause instability
+or unfairness to other users if invoked frequently enough.
+
+It's a "throttle" and not a "limit" because new requests that would exceed the
+max-requests in a period will block until an earlier request completes and then 
+are processed (unless it takes so long that the client decides to stop waiting).
+
+```clojure 
+
+(require '[ring-firewall-middleware.core :as rfm])
+(require '[ring.adapter.jetty :as jetty])
+
+(defn expensive [request]
+  {:status 200 :body "crawl the entire database"})
+  
+(def controlled-chaos
+  (rfm/wrap-rate-throttle expensive {:max-requests 100 :period 60000}))
+  
+(jetty/run-jetty controlled-chaos {:port 3000})
+
+```
+
+
+## Rate Limit
+
+You can use rate limiting to control the number of requests that
+exercise portions of your app over a period of time. This is useful if you have
+endpoints that are particularly expensive and may cause instability
+or unfairness to other users if invoked frequently enough.
+
+It's a "limit" and not a "throttle" because new requests that would exceed the
+max-requests in a period will receive an error response from the server and 
+will need to be retried by the client at a later time.
+
+```clojure 
+
+(require '[ring-firewall-middleware.core :as rfm])
+(require '[ring.adapter.jetty :as jetty])
+
+(defn expensive [request]
+  {:status 200 :body "crawl the entire database"})
+  
+(def controlled-chaos
+  (rfm/wrap-rate-limit expensive {:max-requests 100 :period 60000}))
+  
+(jetty/run-jetty controlled-chaos {:port 3000})
 
 ```
 

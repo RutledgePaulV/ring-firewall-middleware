@@ -24,8 +24,7 @@
   [["releases" :clojars] ["snapshots" :clojars]]
 
   :dependencies
-  [[org.clojure/clojure "1.10.1"]
-   [com.google.guava/guava "29.0-jre"]]
+  [[org.clojure/clojure "1.10.1"]]
 
   :repl-options
   {:init-ns ring-firewall-middleware.core})

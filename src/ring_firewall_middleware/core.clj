@@ -1,9 +1,9 @@
 (ns ring-firewall-middleware.core
-  (:require [clojure.string :as strings])
+  (:require [clojure.string :as strings]
+            [ring-firewall-middleware.impl :as impl])
   (:import [java.net InetAddress]
            [clojure.lang IDeref]
-           [java.util.concurrent Semaphore]
-           [com.google.common.util.concurrent Striped]))
+           [java.util.concurrent Semaphore]))
 
 (def public-ipv4-subnets
   (sorted-set
@@ -90,14 +90,14 @@
   ([request respond raise]
    (respond (default-deny-handler request))))
 
-(defn default-deny-rate-limit-handler
+(defn default-deny-limit-handler
   "Provides a default ring response for users who didn't meet the firewall requirements."
   ([request]
    {:status  429
     :headers {"Content-Type" "text/plain"}
     :body    "Request limit exceeded"})
   ([request respond raise]
-   (respond (default-deny-rate-limit-handler request))))
+   (respond (default-deny-limit-handler request))))
 
 (defn get-forwarded-ip-addresses
   "Gets all the forwarded ip addresses from a request."
@@ -185,7 +185,7 @@
 
    max-concurrent - the maximum number of requests to be handled concurrently
    ident-fn       - a function of a request returning an opaque identifier by which to identify the
-                    semaphore. defaults to a global limit (shared by all users) but you may set it to
+                    semaphore. defaults to a global limit (shared by all clients) but you may set it to
                     ring-firewall-middleware.core/default-client-ident to implement a per-ip limit
                     instead or else write your own function to set it to some other group of clients
                     like those representing one (of many) tenants.
@@ -195,11 +195,11 @@
   ([handler {:keys [max-concurrent ident-fn]
              :or   {max-concurrent 1
                     ident-fn       (constantly :world)}}]
-   (let [stripe (Striped/lazyWeakSemaphore 1 max-concurrent)]
+   (let [stripe (impl/weak-semaphore-factory max-concurrent)]
      (fn concurrency-throttle-handler
        ([request]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get stripe ident)]
+              semaphore ^Semaphore (get stripe ident)]
           (try
             (.acquire semaphore)
             (handler request)
@@ -207,7 +207,7 @@
               (.release semaphore)))))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get stripe ident)]
+              semaphore ^Semaphore (get stripe ident)]
           (.acquire semaphore)
           (handler request
                    (fn [response]
@@ -225,7 +225,7 @@
    max-concurrent - the maximum number of requests to be handled concurrently
    deny-handler   - a function of a ring request that returns a ring response in the event of a denied request.
    ident-fn       - a function of a request returning an opaque identifier by which to identify the
-                    semaphore. defaults to a global limit (shared by all users) but you may set it to
+                    semaphore. defaults to a global limit (shared by all clients) but you may set it to
                     ring-firewall-middleware.core/default-client-ident to implement a per-ip limit
                     instead or else write your own function to set it to some other group of clients
                     like those representing one (of many) tenants.
@@ -234,20 +234,20 @@
    (wrap-concurrency-limit handler {}))
   ([handler {:keys [max-concurrent deny-handler ident-fn]
              :or   {max-concurrent 1
-                    deny-handler   default-deny-rate-limit-handler
+                    deny-handler   default-deny-limit-handler
                     ident-fn       (constantly :world)}}]
-   (let [stripe (Striped/lazyWeakSemaphore 1 max-concurrent)]
+   (let [stripe (impl/weak-semaphore-factory max-concurrent)]
      (fn concurrency-limit-handler
        ([request]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get stripe ident)]
+              semaphore ^Semaphore (get stripe ident)]
           (if (.tryAcquire semaphore)
             (try (handler request)
                  (finally (.release semaphore)))
             (deny-handler request))))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (.get stripe ident)]
+              semaphore ^Semaphore (get stripe ident)]
           (if (.tryAcquire semaphore)
             (handler request
                      (fn [response]
@@ -256,4 +256,73 @@
                      (fn [exception]
                        (.release semaphore)
                        (raise exception)))
+            (deny-handler request respond raise))))))))
+
+
+(defn wrap-rate-throttle
+  "Protect a ring handler against excessive calls. New requests
+   that would exceed the rate limit will block until making
+   them would no longer exceed the rate limit.
+
+   max-requests - the maximum number of requests allowed within the time period.
+   period       - the span of the sliding window (in milliseconds) over which requests are counted.
+   ident-fn     - a function of a request returning an opaque identifier by which to identify the
+                  rate limiter. defaults to a global limit (shared by all clients) but you may set it to
+                  ring-firewall-middleware.core/default-client-ident to implement a per-ip limit
+                  instead or else write your own function to set it to some other group of clients
+                  like those representing one (of many) tenants.
+   "
+  ([handler]
+   (wrap-rate-throttle handler {}))
+  ([handler {:keys [max-requests period ident-fn]
+             :or   {max-requests 100
+                    period       60000
+                    ident-fn     (constantly :world)}}]
+   (let [striped (impl/weak-leaky-semaphore-factory max-requests period)]
+     (fn rate-throttle-handler
+       ([request]
+        (let [ident     (ident-fn request)
+              semaphore ^Semaphore (get striped ident)]
+          (.acquire semaphore)
+          (handler request)))
+       ([request respond raise]
+        (let [ident     (ident-fn request)
+              semaphore ^Semaphore (get striped ident)]
+          (.acquire semaphore)
+          (handler request respond raise)))))))
+
+
+(defn wrap-rate-limit
+  "Protect a ring handler against excessive calls. New requests
+   that would exceed the rate limit will receive a denied response.
+
+   max-requests - the maximum number of requests allowed within the time period.
+   deny-handler - a function of a ring request that returns a ring response in the event of a denied request.
+   period       - the span of the sliding window (in milliseconds) over which requests are counted.
+   ident-fn     - a function of a request returning an opaque identifier by which to identify the
+                  rate limiter. defaults to a global limit (shared by all clients) but you may set it to
+                  ring-firewall-middleware.core/default-client-ident to implement a per-ip limit
+                  instead or else write your own function to set it to some other group of clients
+                  like those representing one (of many) tenants.
+   "
+  ([handler]
+   (wrap-rate-limit handler {}))
+  ([handler {:keys [max-requests period deny-handler ident-fn]
+             :or   {max-requests 100
+                    period       60000
+                    ident-fn     (constantly :world)
+                    deny-handler default-deny-limit-handler}}]
+   (let [striped (impl/weak-leaky-semaphore-factory max-requests period)]
+     (fn rate-limit-handler
+       ([request]
+        (let [ident     (ident-fn request)
+              semaphore ^Semaphore (get striped ident)]
+          (if (.tryAcquire semaphore)
+            (handler request)
+            (deny-handler request))))
+       ([request respond raise]
+        (let [ident     (ident-fn request)
+              semaphore ^Semaphore (get striped ident)]
+          (if (.tryAcquire semaphore)
+            (handler request respond raise)
             (deny-handler request respond raise))))))))
