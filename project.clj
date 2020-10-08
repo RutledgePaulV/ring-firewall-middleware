@@ -1,4 +1,4 @@
-(defproject org.clojars.rutledgepaulv/ring-firewall-middleware "0.1.3"
+(defproject org.clojars.rutledgepaulv/ring-firewall-middleware "0.1.4-SNAPSHOT"
 
   :description
   "A library for filtering ring requests by client ip address."
