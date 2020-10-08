@@ -84,11 +84,11 @@
               (let [timestamp    (System/currentTimeMillis)
                     release-task (TimeoutTask. release (+ timestamp frequency))]
                 (.put task-queue release-task)
-                (when (< (.availablePermits semaphore) n)
-                  (.release semaphore)
-                  ; shift the expire task because there's still activity
-                  (let [expire-task (TimeoutTask. expire (+ timestamp period))]
+                (if (< (.availablePermits semaphore) n)
+                  (let [expire-task (TimeoutTask. expire 0)]
                     (.remove task-queue expire-task)
+                    (.release semaphore))
+                  (let [expire-task (TimeoutTask. expire (+ timestamp period))]
                     (.put task-queue expire-task)))))]
       (force timer)
       (release)

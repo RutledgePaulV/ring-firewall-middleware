@@ -16,7 +16,7 @@
       (dotimes [_ 10]
         (is (.tryAcquire semaphore)))
       (is (not (.tryAcquire semaphore)))
-      (Thread/sleep 3000)
+      (Thread/sleep 4000)
       (is (zero? (.size task-queue)))))
 
   (testing "obeyed rate limit results in endless acquires"
