@@ -199,7 +199,7 @@
      (fn concurrency-throttle-handler
        ([request]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (get stripe ident)]
+              semaphore ^Semaphore (stripe ident)]
           (try
             (.acquire semaphore)
             (handler request)
@@ -207,7 +207,7 @@
               (.release semaphore)))))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (get stripe ident)]
+              semaphore ^Semaphore (stripe ident)]
           (.acquire semaphore)
           (handler request
                    (fn [response]
@@ -240,14 +240,14 @@
      (fn concurrency-limit-handler
        ([request]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (get stripe ident)]
+              semaphore ^Semaphore (stripe ident)]
           (if (.tryAcquire semaphore)
             (try (handler request)
                  (finally (.release semaphore)))
             (deny-handler request))))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (get stripe ident)]
+              semaphore ^Semaphore (stripe ident)]
           (if (.tryAcquire semaphore)
             (handler request
                      (fn [response]
@@ -282,12 +282,12 @@
      (fn rate-throttle-handler
        ([request]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (get striped ident)]
+              semaphore ^Semaphore (striped ident)]
           (.acquire semaphore)
           (handler request)))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (get striped ident)]
+              semaphore ^Semaphore (striped ident)]
           (.acquire semaphore)
           (handler request respond raise)))))))
 
@@ -316,13 +316,13 @@
      (fn rate-limit-handler
        ([request]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (get striped ident)]
+              semaphore ^Semaphore (striped ident)]
           (if (.tryAcquire semaphore)
             (handler request)
             (deny-handler request))))
        ([request respond raise]
         (let [ident     (ident-fn request)
-              semaphore ^Semaphore (get striped ident)]
+              semaphore ^Semaphore (striped ident)]
           (if (.tryAcquire semaphore)
             (handler request respond raise)
             (deny-handler request respond raise))))))))
