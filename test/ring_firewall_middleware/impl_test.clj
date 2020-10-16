@@ -1,6 +1,7 @@
 (ns ring-firewall-middleware.impl-test
   (:require [clojure.test :refer :all]
-            [ring-firewall-middleware.impl :refer :all])
+            [ring-firewall-middleware.impl :refer :all]
+            [ring-firewall-middleware.timer :as timer])
   (:import [java.util.concurrent Semaphore]
            [java.util UUID]))
 
@@ -17,7 +18,7 @@
         (is (.tryAcquire semaphore)))
       (is (not (.tryAcquire semaphore)))
       (Thread/sleep 4000)
-      (is (zero? (.size task-queue)))))
+      (is (zero? (.size timer/task-queue)))))
 
   (testing "obeyed rate limit results in endless acquires"
     (let [striped   (weak-leaky-semaphore-factory 50 1000)
