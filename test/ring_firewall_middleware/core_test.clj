@@ -1,37 +1,11 @@
 (ns ring-firewall-middleware.core-test
   (:require [clojure.test :refer :all]
-            [ring-firewall-middleware.core :as rfm]))
-
-(def v6-range "fe80::21f:5bff:fe33:bd68")
-(def v4-range "192.168.1.104")
-
-(deftest in-cidr-range?-tests
-  (testing "identical always matches"
-    (is (rfm/in-cidr-range? v6-range v6-range))
-    (is (rfm/in-cidr-range? v4-range v4-range)))
-  (testing "ipv4 and ipv6 are mutually exclusive"
-    (is (not (rfm/in-cidr-range? v6-range v4-range)))
-    (is (not (rfm/in-cidr-range? v4-range v6-range))))
-  (testing "0 mask"
-    (is (rfm/in-cidr-range? "0.0.0.0/0" "123.4.5.6"))
-    (is (rfm/in-cidr-range? "0.0.0.0/0" "192.168.0.159"))
-    (is (rfm/in-cidr-range? "192.168.0.159/0" "123.4.5.6"))
-    (is (rfm/in-cidr-range? "192.168.0.159/0" "192.168.0.159")))
-  (testing "ipv4 range"
-    (is (rfm/in-cidr-range? "192.168.1.0/24" "192.168.1.104"))
-    (is (not (rfm/in-cidr-range? "192.168.1.128/25" "192.168.1.104")))
-    (is (rfm/in-cidr-range? "192.168.1.128/25" "192.168.1.159"))
-    (is (not (rfm/in-cidr-range? "192.168.1.128/25" "192.168.2.000"))))
-  (testing "ipv6 range"
-    (is (rfm/in-cidr-range? "2001:DB8::/48" "2001:DB8:0:0:0:0:0:0"))
-    (is (rfm/in-cidr-range? "2001:DB8::/48" "2001:DB8:0:0:0:0:0:1"))
-    (is (rfm/in-cidr-range? "2001:DB8::/48" "2001:DB8:0:FFFF:FFFF:FFFF:FFFF:FFFF"))
-    (is (not (rfm/in-cidr-range? "2001:DB8::/48" "2001:DB8:1:0:0:0:0:0")))))
+            [ring-firewall-middleware.core :refer :all]))
 
 
 (deftest wrap-allow-ips-test
   (let [handler   (fn [req] {:status 200 :body "You have access!"})
-        protected (rfm/wrap-allow-ips handler {:allow-list ["10.0.0.0/8"]})]
+        protected (wrap-allow-ips handler {:allow-list ["10.0.0.0/8"]})]
     (testing "remote-addr only"
       (is (= 200 (:status (protected {:remote-addr "10.20.206.46"}))))
       (is (= 403 (:status (protected {:remote-addr "192.1.1.1"})))))
@@ -41,9 +15,22 @@
       (is (= 403 (:status (protected {:headers     {"x-forwarded-for" "10.20.205.24,192.10.1.1"}
                                       :remote-addr "10.20.206.46"})))))))
 
+(deftest wrap-deny-ips-test
+  (let [handler   (fn [req] {:status 200 :body "You have access!"})
+        protected (wrap-deny-ips handler {:deny-list ["10.0.0.0/8"]})]
+    (testing "remote-addr only"
+      (is (= 403 (:status (protected {:remote-addr "10.20.206.46"}))))
+      (is (= 200 (:status (protected {:remote-addr "192.1.1.1"})))))
+
+    (testing "remote and forwarded"
+      (is (= 200 (:status (protected {:headers     {"x-forwarded-for" "192.1.1.2"}
+                                      :remote-addr "192.1.1.1"}))))
+      (is (= 403 (:status (protected {:headers     {"x-forwarded-for" "10.20.205.24,192.10.1.2"}
+                                      :remote-addr "192.1.1.1"})))))))
+
 (deftest wrap-blocking-concurrency-limit-test
   (let [handler   (fn [req] (Thread/sleep 1000) {:status 200 :body "Response!"})
-        protected (rfm/wrap-concurrency-throttle handler {:max-concurrent 1})
+        protected (wrap-concurrency-throttle handler {:max-concurrent 1})
         start     (System/currentTimeMillis)
         one       (future (protected {}))
         two       (future (protected {}))]
@@ -51,12 +38,51 @@
     (deref two)
     (is (<= 2000 (- (System/currentTimeMillis) start)))))
 
-
 (deftest wrap-rejecting-concurrency-limit-test
   (let [handler   (fn [req] (Thread/sleep 1000) {:status 200 :body "Response!"})
-        protected (rfm/wrap-concurrency-limit handler {:max-concurrent 1})
+        protected (wrap-concurrency-limit handler {:max-concurrent 1})
         one       (future (protected {}))
         two       (future (protected {}))
         responses [(deref one) (deref two)]]
     (is (not-empty (filter #(= 429 (:status %)) responses)))
     (is (not-empty (filter #(= 200 (:status %)) responses)))))
+
+
+(deftest wrap-knock-knock-test
+  (let [handler   (fn [req] {:status 200 :body "You have access!"})
+        options   {:secret "letmein" :access-period 1000 :ban-period 2000 :max-attempts 2}
+        protected (wrap-knock-knock handler options)]
+
+    (testing "I didn't knock"
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1"})))))
+
+    (testing "I knocked correctly"
+      ; initial knock
+      (is (= 200 (:status (protected {:remote-addr "192.1.1.1" :query-params {"knock" "letmein"}}))))
+      ; still have access
+      (is (= 200 (:status (protected {:remote-addr "192.1.1.1"}))))
+      ; others don't have access
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.2"}))))
+      ; still have access
+      (is (= 200 (:status (protected {:remote-addr "192.1.1.1"}))))
+      ; but my access expires
+      (Thread/sleep 1500)
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1"})))))
+
+    (testing "incorrect then correct"
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1" :query-params {"knock" "incorrect"}}))))
+      (is (= 200 (:status (protected {:remote-addr "192.1.1.1" :query-params {"knock" "letmein"}}))))
+      (is (= 200 (:status (protected {:remote-addr "192.1.1.1"}))))
+      (Thread/sleep 1500)
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1"})))))
+
+    (testing "too many incorrect is a ban"
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1" :query-params {"knock" "incorrect"}}))))
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1" :query-params {"knock" "also incorrect"}}))))
+      ;even a right answer now is a fail
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1" :query-params {"knock" "letmein"}}))))
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1"}))))
+      ; but the ban expires
+      (Thread/sleep 2500)
+      (is (= 200 (:status (protected {:remote-addr "192.1.1.1" :query-params {"knock" "letmein"}}))))
+      (is (= 200 (:status (protected {:remote-addr "192.1.1.1"})))))))

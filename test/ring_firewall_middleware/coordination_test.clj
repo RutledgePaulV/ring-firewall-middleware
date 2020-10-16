@@ -1,6 +1,6 @@
-(ns ring-firewall-middleware.impl-test
+(ns ring-firewall-middleware.coordination-test
   (:require [clojure.test :refer :all]
-            [ring-firewall-middleware.impl :refer :all]
+            [ring-firewall-middleware.coordination :refer :all]
             [ring-firewall-middleware.timer :as timer])
   (:import [java.util.concurrent Semaphore]
            [java.util UUID]))

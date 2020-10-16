@@ -1,4 +1,4 @@
-(ns ring-firewall-middleware.impl
+(ns ring-firewall-middleware.coordination
   (:require [ring-firewall-middleware.timer :as timer])
   (:import [clojure.lang IMeta]
            [java.lang.ref WeakReference ReferenceQueue]

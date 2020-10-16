@@ -11,7 +11,7 @@ based on things like source ip, concurrency, and rate of requests. Uses no depen
 
 ---
 
-## Source IP Access 
+## Allow IPs
 
 If you don't already understand the security implications of ip firewalling please read 
 [understanding source ip based security](#understanding-source-ip-based-security). Your 
@@ -34,6 +34,38 @@ and IPv6 ranges.
 
 ```
 
+## Deny IPs
+
+If you don't already understand the security implications of ip firewalling please read
+[understanding source ip based security](#understanding-source-ip-based-security). If any
+of the IPs in your deny-list appear in the forwarded headers or as the source IP of the
+network packets then the request will be denied. This middleware supports both IPv4 and 
+IPv6 ranges.
+
+In most cases you should be using `wrap-allow-ips` and not `wrap-deny-ips`. This middleware
+is only useful for implementing naive banning of poorly behaved clients and should not be relied 
+upon as a robust way to restrict access to your site.
+
+```clojure
+
+(require '[ring-firewall-middleware.core :as rfm])
+(require '[ring.adapter.jetty :as jetty])
+
+(defn site-handler [request]
+  {:status 200 :body "Runescape"})
+
+(def kiddies
+  (->> (slurp "https://raw.githubusercontent.com/stamparm/ipsum/master/ipsum.txt")
+       (clojure.string/split-lines)
+       (keep #(re-find #"(\d+\.\d+\.\d+\.\d+)" %))
+       (map second)))
+
+(def keep-out-the-script-kiddies
+  (rfm/wrap-deny-ips site-handler {:deny-list kiddies}))
+
+(jetty/run-jetty keep-out-the-script-kiddies {:port 3000})
+
+```
 
 ## Concurrency Throttle
 
@@ -141,6 +173,35 @@ will need to be retried by the client at a later time.
 (jetty/run-jetty controlled-chaos {:port 3000})
 
 ```
+
+## Knock Knock
+
+This middleware is a play on port knocking. If a client provides
+a "knock" query parameter in their request with the correct secret
+value then their IP address will be added to the "allow-list" for
+a configurable amount of time. Otherwise, if they provide an incorrect
+secret too many times they will be added to the "deny-list" for a period
+of time which prevents even a subsequent successful attempt. If no knock 
+is provided the request is simply denied.
+
+```clojure 
+
+(require '[ring-firewall-middleware.core :as rfm])
+(require '[ring.adapter.jetty :as jetty])
+
+(defn admin-handler [request]
+  {:status 200 :body "Top Secret!"})
+  
+(def super-safe
+  (rfm/wrap-knock-knock admin-handler {:secret "shaveandahaircut2bits"}))
+  
+(jetty/run-jetty super-safe {:port 3000})
+
+; grant access for 30 minutes
+; curl http://localhost:3000?knock=shaveandahaircut2bits
+
+```
+
 
 ---
 

@@ -1,127 +1,30 @@
 (ns ring-firewall-middleware.core
-  (:require [clojure.string :as strings]
-            [ring-firewall-middleware.impl :as impl])
-  (:import [java.net InetAddress]
-           [clojure.lang IDeref]
-           [java.util.concurrent Semaphore]))
+  (:require [ring-firewall-middleware.coordination :as coord]
+            [ring-firewall-middleware.timer :as timer]
+            [ring-firewall-middleware.cidr :as cidr]
+            [ring-firewall-middleware.utils :as util])
+  (:import [java.util.concurrent Semaphore]
+           [java.util UUID]))
 
-(def public-ipv4-subnets
-  (sorted-set
-    "0.0.0.0/5" "8.0.0.0/7" "11.0.0.0/8"
-    "12.0.0.0/6" "16.0.0.0/4" "32.0.0.0/3"
-    "64.0.0.0/2" "128.0.0.0/3" "160.0.0.0/5"
-    "168.0.0.0/6" "172.0.0.0/12" "172.32.0.0/11"
-    "172.64.0.0/10" "172.128.0.0/9" "173.0.0.0/8"
-    "174.0.0.0/7" "176.0.0.0/4" "192.0.0.0/9"
-    "192.128.0.0/11" "192.160.0.0/13" "192.169.0.0/16"
-    "192.170.0.0/15" "192.172.0.0/14" "192.176.0.0/12"
-    "192.192.0.0/10" "193.0.0.0/8" "194.0.0.0/7"
-    "196.0.0.0/6" "200.0.0.0/5" "208.0.0.0/4"))
 
-(def public-ipv6-subnets
-  (sorted-set
-    "0:0:0:0:0:0:0:0/1" "8000:0:0:0:0:0:0:0/2"
-    "c000:0:0:0:0:0:0:0/3" "e000:0:0:0:0:0:0:0/4"
-    "f000:0:0:0:0:0:0:0/5" "f800:0:0:0:0:0:0:0/6"
-    "fe00:0:0:0:0:0:0:0/7"))
-
-(def private-ipv4-subnets
-  (sorted-set "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"))
-
-(def private-ipv6-subnets
-  (sorted-set "fc00::/7"))
-
-(def private-subnets
-  (into private-ipv4-subnets private-ipv6-subnets))
-
-(def public-subnets
-  (into public-ipv4-subnets public-ipv6-subnets))
-
-(def honored-proxy-headers
-  ["True-Client-IP" "true-client-ip" "X-Forwarded-For" "x-forwarded-for"])
-
-(defn in-cidr-range?
-  "Is a given client ip within a given cidr range?"
-  [cidr client-ip]
-  (try
-    (let [[cidr-ip cidr-mask]
-          (if (strings/includes? cidr "/")
-            (let [[ip mask] (strings/split cidr #"/")]
-              [ip (Integer/parseInt mask)])
-            [cidr (int -1)])
-          cidr-inet   (InetAddress/getByName cidr-ip)
-          client-inet (InetAddress/getByName client-ip)]
-      (and
-        (identical? (class cidr-inet) (class client-inet))
-        (if (neg? cidr-mask)
-          (= cidr-inet client-inet)
-          (let [cidr-bytes      (.getAddress cidr-inet)
-                client-bytes    (.getAddress client-inet)
-                cidr-mask-bytes (quot cidr-mask (int 8))
-                final-byte      (unchecked-byte (bit-shift-right 0xFF00 (bit-and cidr-mask 0x07)))]
-            (and
-              (reduce #(or (= (aget cidr-bytes %2) (aget client-bytes %2)) (reduced false)) true (range cidr-mask-bytes))
-              (or (zero? final-byte)
-                  (= (bit-and (aget cidr-bytes cidr-mask-bytes) final-byte)
-                     (bit-and (aget client-bytes cidr-mask-bytes) final-byte))))))))
-    (catch Exception e false)))
-
-(defn in-cidr-ranges?
-  "Is a given ip address in one of the provided cidr ranges?"
-  [cidr-ranges ip-address]
-  (reduce #(if (in-cidr-range? %2 ip-address) (reduced true) false) false cidr-ranges))
-
-(defn private-address?
-  "Is this a private ip address as defined by RFC 1918 or RFC 4193?"
-  [ip-address]
-  (in-cidr-ranges? private-subnets ip-address))
-
-(defn public-address?
-  "Is this not a private ip address as defined by RFC 1918 or RFC 4193?"
-  [ip-address]
-  (in-cidr-ranges? public-subnets ip-address))
-
-(defn default-deny-handler
+(defn default-forbidden-handler
   "Provides a default ring response for users who didn't meet the firewall requirements."
   ([request]
    {:status  403
     :headers {"Content-Type" "text/plain"}
     :body    "Access denied"})
   ([request respond raise]
-   (respond (default-deny-handler request))))
+   (respond (default-forbidden-handler request))))
 
-(defn default-deny-limit-handler
-  "Provides a default ring response for users who didn't meet the firewall requirements."
+
+(defn default-limited-handler
+  "Provides a default ring response for users who exceeded the imposed limit."
   ([request]
    {:status  429
     :headers {"Content-Type" "text/plain"}
-    :body    "Request limit exceeded"})
+    :body    "Limit exceeded"})
   ([request respond raise]
-   (respond (default-deny-limit-handler request))))
-
-(defn get-forwarded-ip-addresses
-  "Gets all the forwarded ip addresses from a request."
-  [request]
-  (letfn [(parse-header [header]
-            (if-some [value (get-in request [:headers header])]
-              (strings/split value #"\s*,\s*")
-              ()))]
-    (->> honored-proxy-headers
-         (mapcat parse-header)
-         (remove strings/blank?))))
-
-(defn default-client-ident [request]
-  (into #{(:remote-addr request)} (get-forwarded-ip-addresses request)))
-
-(defn request-matches?
-  "Does the ring request satisfy the access list?"
-  [request access-list]
-  (->> (default-client-ident request)
-       (every? (partial in-cidr-ranges? access-list))))
-
-
-(defn- touch [x]
-  (if (instance? IDeref x) (deref x) x))
+   (respond (default-limited-handler request))))
 
 
 (defn wrap-allow-ips
@@ -138,17 +41,19 @@
   ([handler]
    (wrap-allow-ips handler {}))
   ([handler {:keys [allow-list deny-handler]
-             :or   {allow-list   private-subnets
-                    deny-handler default-deny-handler}}]
+             :or   {allow-list   cidr/private-subnets
+                    deny-handler default-forbidden-handler}}]
    (fn allow-ips-handler
      ([request]
-      (if (request-matches? request (touch allow-list))
-        (handler request)
-        (deny-handler request)))
+      (let [client-chain (cidr/client-ip-chain request)]
+        (if (cidr/client-allowed? client-chain allow-list)
+          (handler request)
+          (deny-handler request))))
      ([request respond raise]
-      (if (request-matches? request (touch allow-list))
-        (handler request respond raise)
-        (deny-handler request respond raise))))))
+      (let [client-chain (cidr/client-ip-chain request)]
+        (if (cidr/client-allowed? client-chain allow-list)
+          (handler request respond raise)
+          (deny-handler request respond raise)))))))
 
 
 (defn wrap-deny-ips
@@ -165,17 +70,19 @@
   ([handler]
    (wrap-deny-ips handler {}))
   ([handler {:keys [deny-list deny-handler]
-             :or   {deny-list    public-subnets
-                    deny-handler default-deny-handler}}]
+             :or   {deny-list    cidr/public-subnets
+                    deny-handler default-forbidden-handler}}]
    (fn deny-ips-handler
      ([request]
-      (if-not (request-matches? request (touch deny-list))
-        (handler request)
-        (deny-handler request)))
+      (let [client-chain (cidr/client-ip-chain request)]
+        (if-not (cidr/client-denied? client-chain deny-list)
+          (handler request)
+          (deny-handler request))))
      ([request respond raise]
-      (if-not (request-matches? request (touch deny-list))
-        (handler request respond raise)
-        (deny-handler request respond raise))))))
+      (let [client-chain (cidr/client-ip-chain request)]
+        (if-not (cidr/client-denied? client-chain deny-list)
+          (handler request respond raise)
+          (deny-handler request respond raise)))))))
 
 
 (defn wrap-concurrency-throttle
@@ -195,7 +102,7 @@
   ([handler {:keys [max-concurrent ident-fn]
              :or   {max-concurrent 1
                     ident-fn       (constantly :world)}}]
-   (let [stripe (impl/weak-semaphore-factory max-concurrent)]
+   (let [stripe (coord/weak-semaphore-factory max-concurrent)]
      (fn concurrency-throttle-handler
        ([request]
         (let [ident     (ident-fn request)
@@ -217,6 +124,7 @@
                      (.release semaphore)
                      (raise exception)))))))))
 
+
 (defn wrap-concurrency-limit
   "Protect a ring handler against excessive concurrency. New requests
    after the concurrency limit is already saturated will receive a
@@ -234,9 +142,9 @@
    (wrap-concurrency-limit handler {}))
   ([handler {:keys [max-concurrent deny-handler ident-fn]
              :or   {max-concurrent 1
-                    deny-handler   default-deny-limit-handler
+                    deny-handler   default-limited-handler
                     ident-fn       (constantly :world)}}]
-   (let [stripe (impl/weak-semaphore-factory max-concurrent)]
+   (let [stripe (coord/weak-semaphore-factory max-concurrent)]
      (fn concurrency-limit-handler
        ([request]
         (let [ident     (ident-fn request)
@@ -278,7 +186,7 @@
              :or   {max-requests 100
                     period       60000
                     ident-fn     (constantly :world)}}]
-   (let [striped (impl/weak-leaky-semaphore-factory max-requests period)]
+   (let [striped (coord/weak-leaky-semaphore-factory max-requests period)]
      (fn rate-throttle-handler
        ([request]
         (let [ident     (ident-fn request)
@@ -311,8 +219,8 @@
              :or   {max-requests 100
                     period       60000
                     ident-fn     (constantly :world)
-                    deny-handler default-deny-limit-handler}}]
-   (let [striped (impl/weak-leaky-semaphore-factory max-requests period)]
+                    deny-handler default-limited-handler}}]
+   (let [striped (coord/weak-leaky-semaphore-factory max-requests period)]
      (fn rate-limit-handler
        ([request]
         (let [ident     (ident-fn request)
@@ -326,3 +234,77 @@
           (if (.tryAcquire semaphore)
             (handler request respond raise)
             (deny-handler request respond raise))))))))
+
+
+(defn wrap-knock-knock
+  "Protects a ring handler against access until a secret knock is presented.
+   After the secret knock is satisfied access is granted for a configurable
+   amount of time to the client that presented the knock. Too many attempts
+   of the wrong knock will land you on the ban list for a longer period of
+   time and even correct knocks will be rejected."
+  ([handler {:keys [secret max-attempts access-period ban-period deny-handler]
+             :or   {secret        (str (UUID/randomUUID))
+                    max-attempts  5
+                    access-period 1800000                   ; 30 minutes
+                    ban-period    86400000                  ; 1 day
+                    deny-handler  default-forbidden-handler}}]
+   (let [state (atom {:allow-list #{} :deny-list #{} :demerits {}})]
+     (letfn [(successful-knock? [request]
+               (let [param (util/query-param request "knock")]
+                 (and (some? param) (util/secure= param secret))))
+             (unsuccessful-knock? [request]
+               (let [param (util/query-param request "knock")]
+                 (and (some? param) (not (util/secure= param secret)))))
+             (grant-access [state client-chain]
+               (-> state
+                   (update :allow-list conj client-chain)
+                   (update :demerits dissoc client-chain)))
+             (deny-access [state client-chain]
+               (let [demerit-count (inc (or (get-in state [:demerits client-chain]) 0))]
+                 (if (<= max-attempts demerit-count)
+                   (-> state
+                       (update :demerits dissoc client-chain)
+                       (update :deny-list conj client-chain))
+                   (-> state
+                       (update :demerits assoc client-chain demerit-count)))))
+             (banned? [old-state new-state client-chain]
+               (and (contains? (:deny-list new-state) client-chain)
+                    (not (contains? (:deny-list old-state) client-chain))))
+             (allow! [client-chain]
+               (swap! state grant-access client-chain)
+               (timer/schedule (+ (System/currentTimeMillis) access-period)
+                 (fn [] (swap! state update :allow-list disj client-chain))))
+             (deny! [client-chain]
+               (let [[old-state new-state] (swap-vals! state deny-access client-chain)]
+                 (when (banned? old-state new-state client-chain)
+                   (timer/schedule (+ (System/currentTimeMillis) ban-period)
+                     (fn [] (swap! state update :deny-list disj client-chain))))))]
+       (fn knock-knock-handler
+         ([request]
+          (let [{:keys [allow-list deny-list]} (deref state)
+                client-chain (cidr/client-ip-chain request)]
+            (cond
+              (cidr/client-denied? client-chain deny-list)
+              (deny-handler request)
+              (cidr/client-allowed? client-chain allow-list)
+              (handler request)
+              (successful-knock? request)
+              (do (allow! client-chain) (handler request))
+              (unsuccessful-knock? request)
+              (do (deny! client-chain) (deny-handler request))
+              :otherwise
+              (deny-handler request))))
+         ([request respond raise]
+          (let [{:keys [allow-list deny-list]} (deref state)
+                client-chain (cidr/client-ip-chain request)]
+            (cond
+              (cidr/client-denied? client-chain deny-list)
+              (deny-handler request respond raise)
+              (cidr/client-allowed? client-chain allow-list)
+              (handler request respond raise)
+              (successful-knock? request)
+              (do (allow! client-chain) (handler request respond raise))
+              (unsuccessful-knock? request)
+              (do (deny! client-chain) (deny-handler request respond raise))
+              :otherwise
+              (deny-handler request respond raise)))))))))
