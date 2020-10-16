@@ -193,12 +193,12 @@ is provided the request is simply denied.
   {:status 200 :body "Top Secret!"})
   
 (def super-safe
-  (rfm/wrap-knock-knock admin-handler {:secret "shavandahaircuttwobits"}))
+  (rfm/wrap-knock-knock admin-handler {:secret "shaveandahaircut2bits"}))
   
 (jetty/run-jetty super-safe {:port 3000})
 
 ; grant access for 30 minutes
-; curl http://localhost:3000?knock=shaveandahaircuttwobits
+; curl http://localhost:3000?knock=shaveandahaircut2bits
 
 ```
 
