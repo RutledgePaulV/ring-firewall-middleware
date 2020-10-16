@@ -28,7 +28,7 @@ and IPv6 ranges.
   {:status 200 :body "Top Secret!"})
 
 (def internal-network-only
-  (rfm/wrap-allow-ips admin-handler {:allow-list ["10.0.0.0/8"]}))
+  (rfm/wrap-allow-ips admin-handler {:allow-list #{"10.0.0.0/8"}}))
 
 (jetty/run-jetty internal-network-only {:port 3000})
 
@@ -58,7 +58,8 @@ upon as a robust way to restrict access to your site.
   (->> (slurp "https://raw.githubusercontent.com/stamparm/ipsum/master/ipsum.txt")
        (clojure.string/split-lines)
        (keep #(re-find #"(\d+\.\d+\.\d+\.\d+)" %))
-       (map second)))
+       (map second)
+       (into #{})))
 
 (def keep-out-the-script-kiddies
   (rfm/wrap-deny-ips site-handler {:deny-list kiddies}))
