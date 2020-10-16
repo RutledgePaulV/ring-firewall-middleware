@@ -276,7 +276,7 @@
                  (fn [] (swap! state update :allow-list disj client-chain))))
              (deny! [client-chain]
                (let [[old-state new-state] (swap-vals! state deny-access client-chain)]
-                 (when (banned? old-state new-state)
+                 (when (banned? old-state new-state client-chain)
                    (timer/schedule (+ (System/currentTimeMillis) ban-period)
                      (fn [] (swap! state update :deny-list disj client-chain))))))]
        (fn knock-knock-handler

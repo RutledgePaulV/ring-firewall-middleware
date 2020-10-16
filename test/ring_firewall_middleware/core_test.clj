@@ -46,3 +46,43 @@
         responses [(deref one) (deref two)]]
     (is (not-empty (filter #(= 429 (:status %)) responses)))
     (is (not-empty (filter #(= 200 (:status %)) responses)))))
+
+
+(deftest wrap-knock-knock-test
+  (let [handler   (fn [req] {:status 200 :body "You have access!"})
+        options   {:secret "letmein" :access-period 1000 :ban-period 2000 :max-attempts 2}
+        protected (wrap-knock-knock handler options)]
+
+    (testing "I didn't knock"
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1"})))))
+
+    (testing "I knocked correctly"
+      ; initial knock
+      (is (= 200 (:status (protected {:remote-addr "192.1.1.1" :query-params {"knock" "letmein"}}))))
+      ; still have access
+      (is (= 200 (:status (protected {:remote-addr "192.1.1.1"}))))
+      ; others don't have access
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.2"}))))
+      ; still have access
+      (is (= 200 (:status (protected {:remote-addr "192.1.1.1"}))))
+      ; but my access expires
+      (Thread/sleep 1500)
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1"})))))
+
+    (testing "incorrect then correct"
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1" :query-params {"knock" "incorrect"}}))))
+      (is (= 200 (:status (protected {:remote-addr "192.1.1.1" :query-params {"knock" "letmein"}}))))
+      (is (= 200 (:status (protected {:remote-addr "192.1.1.1"}))))
+      (Thread/sleep 1500)
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1"})))))
+
+    (testing "too many incorrect is a ban"
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1" :query-params {"knock" "incorrect"}}))))
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1" :query-params {"knock" "also incorrect"}}))))
+      ;even a right answer now is a fail
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1" :query-params {"knock" "letmein"}}))))
+      (is (= 403 (:status (protected {:remote-addr "192.1.1.1"}))))
+      ; but the ban expires
+      (Thread/sleep 2500)
+      (is (= 200 (:status (protected {:remote-addr "192.1.1.1" :query-params {"knock" "letmein"}}))))
+      (is (= 200 (:status (protected {:remote-addr "192.1.1.1"})))))))

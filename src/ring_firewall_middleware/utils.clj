@@ -1,6 +1,6 @@
 (ns ring-firewall-middleware.utils
   (:require [clojure.string :as strings])
-  (:import [java.net URLDecoder]
+  (:import [java.net URLDecoder URLEncoder]
            [java.util.regex Pattern]
            [clojure.lang IDeref]
            [java.security MessageDigest]))
@@ -28,7 +28,8 @@
     (or (get-in request [:query-params (name param)])
         (get-in request [:query-params (keyword param)]))
     (not (strings/blank? (get-in request [:query-string])))
-    (let [pattern (Pattern/compile (format "%s=([^&]+)" (Pattern/quote param)) Pattern/CASE_INSENSITIVE)]
+    (let [quoted  (Pattern/quote (URLEncoder/encode param "UTF-8"))
+          pattern (Pattern/compile (format "%s=([^&]+)" quoted) Pattern/CASE_INSENSITIVE)]
       (when-some [[_ value] (re-find pattern (:query-string request))]
         (URLDecoder/decode value "UTF-8")))))
 
