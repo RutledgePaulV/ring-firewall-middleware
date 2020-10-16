@@ -109,15 +109,15 @@
 (defn client-allowed?
   "Does the ring request satisfy the allow list? For a request to be allowed
    every ip address in the http header chain needs to be allowed."
-  [client-ident allow-list]
+  [client-chain allow-list]
   (let [allow-list (util/touch allow-list)
         predicate  (partial in-cidr-ranges? (set (filter string? allow-list)))]
-    (or (contains? (set allow-list) client-ident) (every? predicate client-ident))))
+    (or (contains? (set allow-list) client-chain) (every? predicate client-chain))))
 
 (defn client-denied?
   "Does the ring request satisfy the deny list? For a request to be denied
    just one ip address in the http header chain needs to be denied."
-  [client-ident deny-list]
+  [client-chain deny-list]
   (let [deny-list (util/touch deny-list)
         predicate (partial in-cidr-ranges? (set (filter string? deny-list)))]
-    (or (contains? (set deny-list) client-ident) (not (empty? (filter predicate client-ident))))))
+    (or (contains? (set deny-list) client-chain) (not (empty? (filter predicate client-chain))))))
