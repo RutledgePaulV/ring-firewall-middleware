@@ -51,13 +51,19 @@ upon as a robust way to restrict access to your site.
 (require '[ring-firewall-middleware.core :as rfm])
 (require '[ring.adapter.jetty :as jetty])
 
-(defn admin-handler [request]
-  {:status 200 :body "Top Secret!"})
+(defn site-handler [request]
+  {:status 200 :body "Runescape"})
 
-(def not-from-the-internal-network
-  (rfm/wrap-deny-ips admin-handler {:deny-list ["10.0.0.0/8"]}))
+(def kiddies
+  (->> (slurp "https://raw.githubusercontent.com/stamparm/ipsum/master/ipsum.txt")
+       (clojure.string/split-lines)
+       (keep #(re-find #"(\d+\.\d+\.\d+\.\d+)" %))
+       (map second)))
 
-(jetty/run-jetty not-from-the-internal-network {:port 3000})
+(def keep-out-the-script-kiddies
+  (rfm/wrap-deny-ips site-handler {:deny-list kiddies}))
+
+(jetty/run-jetty keep-out-the-script-kiddies {:port 3000})
 
 ```
 

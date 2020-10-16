@@ -88,7 +88,8 @@
 (defn in-cidr-ranges?
   "Is a given ip address in one of the provided cidr ranges?"
   [cidr-ranges ip-address]
-  (reduce #(if (in-cidr-range? %2 ip-address) (reduced true) false) false cidr-ranges))
+  (or (contains? (set cidr-ranges) ip-address)
+      (reduce #(if (in-cidr-range? %2 ip-address) (reduced true) false) false cidr-ranges)))
 
 (defn private-address?
   "Is this a private ip address as defined by RFC 1918 or RFC 4193?"
@@ -110,7 +111,7 @@
    every ip address in the http header chain needs to be allowed."
   [client-ident allow-list]
   (let [allow-list (util/touch allow-list)
-        predicate  (partial in-cidr-ranges? (filter string? allow-list))]
+        predicate  (partial in-cidr-ranges? (set (filter string? allow-list)))]
     (or (contains? (set allow-list) client-ident) (every? predicate client-ident))))
 
 (defn client-denied?
@@ -118,5 +119,5 @@
    just one ip address in the http header chain needs to be denied."
   [client-ident deny-list]
   (let [deny-list (util/touch deny-list)
-        predicate (partial in-cidr-ranges? (filter string? deny-list))]
+        predicate (partial in-cidr-ranges? (set (filter string? deny-list)))]
     (or (contains? (set deny-list) client-ident) (not (empty? (filter predicate client-ident))))))
