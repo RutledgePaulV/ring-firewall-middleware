@@ -2,7 +2,8 @@
   (:require [ring-firewall-middleware.coordination :as coord]
             [ring-firewall-middleware.timer :as timer]
             [ring-firewall-middleware.cidr :as cidr]
-            [ring-firewall-middleware.utils :as util])
+            [ring-firewall-middleware.utils :as util]
+            [ring-firewall-middleware.maintenance :as main])
   (:import [java.util.concurrent Semaphore]
            [java.util UUID]))
 
@@ -25,6 +26,16 @@
     :body    "Limit exceeded"})
   ([request respond raise]
    (respond (default-limited-handler request))))
+
+
+(defn default-maintenance-handler
+  "Provides a default ring response for when the server is enforcing a maintenance mode."
+  ([request]
+   {:status  503
+    :headers {"Content-Type" "text/plain"}
+    :body    "Undergoing maintenance"})
+  ([request respond raise]
+   (respond (default-maintenance-handler request))))
 
 
 (defn wrap-allow-ips
@@ -118,11 +129,15 @@
           (.acquire semaphore)
           (handler request
                    (fn [response]
-                     (.release semaphore)
-                     (respond response))
+                     (try
+                       (respond response)
+                       (finally
+                         (.release semaphore))))
                    (fn [exception]
-                     (.release semaphore)
-                     (raise exception)))))))))
+                     (try
+                       (raise exception)
+                       (finally
+                         (.release semaphore)))))))))))
 
 
 (defn wrap-concurrency-limit
@@ -159,11 +174,15 @@
           (if (.tryAcquire semaphore)
             (handler request
                      (fn [response]
-                       (.release semaphore)
-                       (respond response))
+                       (try
+                         (respond response)
+                         (finally
+                           (.release semaphore))))
                      (fn [exception]
-                       (.release semaphore)
-                       (raise exception)))
+                       (try
+                         (raise exception)
+                         (finally
+                           (.release semaphore)))))
             (deny-handler request respond raise))))))))
 
 
@@ -308,3 +327,62 @@
               (do (deny! client-chain) (deny-handler request respond raise))
               :otherwise
               (deny-handler request respond raise)))))))))
+
+
+(defn wrap-maintenance-mode
+  "Middleware that coordinates requests to establish a maintenance mode when
+   requested. When maintenance mode is enabled any new requests will be denied
+   but in-flight requests will be given a chance to finish prior to maintenance
+   activities beginning."
+  [handler {:keys [ident-fn bypass-list deny-handler]
+            :or   {ident-fn     (constantly :world)
+                   deny-handler default-maintenance-handler
+                   bypass-list  #{}}}]
+  (fn maintenance-limit-handler
+    ([request]
+     (let [{:keys [lock phaser]} (main/get-state (ident-fn request))]
+       (if (and (some? lock) (= ::limited (deref lock 0 ::limited)))
+         (let [bypassable   (util/touch bypass-list)
+               client-chain (cidr/client-ip-chain request)]
+           (if (cidr/client-allowed? client-chain bypassable)
+             (handler request)
+             (deny-handler request)))
+         (do (main/register-phaser phaser)
+             (try
+               (main/register-phaser phaser)
+               (handler request)
+               (finally
+                 (main/deregister-phaser phaser)))))))
+    ([request respond raise]
+     (let [{:keys [lock phaser]} (main/get-state (ident-fn request))]
+       (if (and (some? lock) (= ::limited (deref lock 0 ::limited)))
+         (let [bypassable   (util/touch bypass-list)
+               client-chain (cidr/client-ip-chain request)]
+           (if (cidr/client-allowed? client-chain bypassable)
+             (handler request respond raise)
+             (deny-handler request respond raise)))
+         (do (main/register-phaser phaser)
+             (handler request
+                      (fn [response]
+                        (try
+                          (respond response)
+                          (finally
+                            (main/deregister-phaser phaser))))
+                      (fn [exception]
+                        (try
+                          (raise exception)
+                          (finally
+                            (main/deregister-phaser phaser)))))))))))
+
+
+(defmacro with-maintenance-mode
+  "Enables maintenance mode for the given identity and
+   executes body after all in-flight requests have
+   completed."
+  [ident & body]
+  (let [[lock# phaser#] (main/exclusive-lock ~ident)]
+    (try
+      (main/await-phaser phaser#)
+      ~@body
+      (finally
+        (main/release-lock lock#)))))
