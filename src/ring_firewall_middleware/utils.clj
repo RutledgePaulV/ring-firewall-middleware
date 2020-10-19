@@ -28,10 +28,10 @@
     (or (get-in request [:query-params (name param)])
         (get-in request [:query-params (keyword param)]))
     (not (strings/blank? (get-in request [:query-string])))
-    (let [quoted  (Pattern/quote (URLEncoder/encode param "UTF-8"))
+    (let [quoted  (Pattern/quote (URLEncoder/encode ^String param "UTF-8"))
           pattern (Pattern/compile (format "%s=([^&]+)" quoted) Pattern/CASE_INSENSITIVE)]
       (when-some [[_ value] (re-find pattern (:query-string request))]
-        (URLDecoder/decode value "UTF-8")))))
+        (URLDecoder/decode ^String value "UTF-8")))))
 
 (defn touch [x]
   (if (instance? IDeref x) (deref x) x))

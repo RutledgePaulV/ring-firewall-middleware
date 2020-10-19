@@ -351,7 +351,6 @@
               (deny-handler request)))
           (do (main/register-phaser phaser)
               (try
-                (main/register-phaser phaser)
                 (handler request)
                 (finally
                   (main/deregister-phaser phaser)))))))
