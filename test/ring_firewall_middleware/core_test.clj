@@ -86,3 +86,22 @@
       (Thread/sleep 2500)
       (is (= 200 (:status (protected {:remote-addr "192.1.1.1" :query-params {"knock" "letmein"}}))))
       (is (= 200 (:status (protected {:remote-addr "192.1.1.1"})))))))
+
+(deftest wrap-maintenance-mode-test
+  (let [handler   (fn [request]
+                    (when (number? request)
+                      (Thread/sleep request))
+                    {:status 200 :body "Under the hood"})
+        protected (wrap-maintenance-mode handler)
+        started   (promise)
+        finished  (promise)]
+    (is (= 200 (:status (protected {}))))
+    (future
+      (with-maintenance-mode :world
+        (deliver started true)
+        (Thread/sleep 2000))
+      (deliver finished true))
+    (deref started)
+    (is (= 503 (:status (protected {}))))
+    (deref finished)
+    (is (= 200 (:status (protected {}))))))
