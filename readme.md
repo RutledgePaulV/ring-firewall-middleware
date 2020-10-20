@@ -162,32 +162,36 @@ error response from the server and will need to be retried by the client at a la
 
 ```
 
-## Knock Knock
+## Maintenance Throttle
 
-This middleware is a play on port knocking. If a client provides a "knock" query parameter in their request with the
-correct secret value then their IP address will be added to the "allow-list" for a configurable amount of time.
-Otherwise, if they provide an incorrect secret too many times they will be added to the "deny-list" for a period of time
-which prevents even a subsequent successful attempt. If no knock is provided the request is simply denied.
+This middleware adds request coordination so that you can enter and exit a "maintenance mode" from elsewhere in your
+code. When maintenance mode is active new requests are blocked and in-flight requests are awaited before executing the
+maintenance code. Optionally bypass maintenance mode for a specific set of IPs.
 
-```clojure 
+```clojure
 
 (require '[ring-firewall-middleware.core :as rfm])
 (require '[ring.adapter.jetty :as jetty])
 
-(defn admin-handler [request]
-  {:status 200 :body "Top Secret!"})
-  
-(def super-safe
-  (rfm/wrap-knock-knock admin-handler {:secret "shaveandahaircut2bits"}))
-  
-(jetty/run-jetty super-safe {:port 3000})
+(defn site-handler [request]
+  {:status 200 :body "My site is up!"})
 
-; grant access for 30 minutes
-; curl http://localhost:3000?knock=shaveandahaircut2bits
+(def maintainable
+  (rfm/wrap-maintenance-throttle site-handler {:bypass-list #{"10.0.0.0/8"}}))
+
+(jetty/run-jetty maintainable {:port 3000 :join? false})
+
+
+(defn do-maintenance! []
+  ; this macro will wait to execute migrate-the-database!
+  ; until all in-flight requests are complete and no new
+  ; requests will be permitted until it completes.
+  (rfm/with-maintenance-mode :world 
+     (migrate-the-database!)))
 
 ```
 
-## Maintenance Mode
+## Maintenance Limit
 
 This middleware adds request coordination so that you can enter and exit a "maintenance mode" from elsewhere in your
 code. When maintenance mode is active new requests are denied and in-flight requests are awaited before executing the
@@ -202,7 +206,7 @@ maintenance code. Optionally bypass maintenance mode for a specific set of IPs.
   {:status 200 :body "My site is up!"})
 
 (def maintainable
-  (rfm/wrap-maintenance-mode site-handler {:bypass-list #{"10.0.0.0/8"}}))
+  (rfm/wrap-maintenance-limit site-handler {:bypass-list #{"10.0.0.0/8"}}))
 
 (jetty/run-jetty maintainable {:port 3000 :join? false})
 
@@ -258,10 +262,10 @@ So long as you understand the above and know that you're either pulling the corr
 http header (in the case of a reverse proxy) or directly from the network packet ip (no reverse proxy)
 then ip firewalling is a fine security mechanism for TCP protocol.
 
-Note that the advice here applies only to HTTP over TCP. UDP is a very different story because a single malicious packet
+Note that the advice here applies only to TCP. UDP is a very different story because a single malicious packet
 can cause application level code to execute (there is no round trip unless implemented as part of the application level
-communications). Even though an attacker is still unable to access the response they can do things like DDOS another
-service by directing all responses from the server to that other service.
+communications). Attackers unable to access the response can still do things like DDOS another server by directing
+responses from the target server to the victim server.
 
 Good security professionals will always recommend "defense in depth" which would suggest sensitive things should require
 multiple mechanisms for access, like personal authentication and not only network access. In this way, if your network

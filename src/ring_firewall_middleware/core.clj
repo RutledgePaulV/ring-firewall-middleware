@@ -1,11 +1,9 @@
 (ns ring-firewall-middleware.core
   (:require [ring-firewall-middleware.coordination :as coord]
-            [ring-firewall-middleware.timer :as timer]
             [ring-firewall-middleware.cidr :as cidr]
             [ring-firewall-middleware.utils :as util]
             [ring-firewall-middleware.maintenance :as main])
-  (:import [java.util.concurrent Semaphore]
-           [java.util UUID]))
+  (:import [java.util.concurrent Semaphore TimeUnit]))
 
 
 (defn default-forbidden-handler
@@ -147,6 +145,8 @@
 
    max-concurrent - the maximum number of requests to be handled concurrently
    deny-handler   - a function of a ring request that returns a ring response in the event of a denied request.
+   max-wait       - the amount of time (in milliseconds) that a request should wait optimistically before
+                    succeeding or returning with a denied response.
    ident-fn       - a function of a request returning an opaque identifier by which to identify the
                     semaphore. defaults to a global limit (shared by all clients) but you may set it to
                     ring-firewall-middleware.core/default-client-ident to implement a per-ip limit
@@ -155,23 +155,24 @@
    "
   ([handler]
    (wrap-concurrency-limit handler {}))
-  ([handler {:keys [max-concurrent deny-handler ident-fn]
+  ([handler {:keys [max-concurrent deny-handler ident-fn max-wait]
              :or   {max-concurrent 1
                     deny-handler   default-limited-handler
-                    ident-fn       (constantly :world)}}]
+                    ident-fn       (constantly :world)
+                    max-wait       50}}]
    (let [stripe (coord/weak-semaphore-factory max-concurrent)]
      (fn concurrency-limit-handler
        ([request]
         (let [ident     (ident-fn request)
               semaphore ^Semaphore (stripe ident)]
-          (if (.tryAcquire semaphore)
+          (if (.tryAcquire semaphore max-wait TimeUnit/MILLISECONDS)
             (try (handler request)
                  (finally (.release semaphore)))
             (deny-handler request))))
        ([request respond raise]
         (let [ident     (ident-fn request)
               semaphore ^Semaphore (stripe ident)]
-          (if (.tryAcquire semaphore)
+          (if (.tryAcquire semaphore max-wait TimeUnit/MILLISECONDS)
             (handler request
                      (fn [response]
                        (try
@@ -226,6 +227,8 @@
    max-requests - the maximum number of requests allowed within the time period.
    deny-handler - a function of a ring request that returns a ring response in the event of a denied request.
    period       - the span of the sliding window (in milliseconds) over which requests are counted.
+   max-wait     - the amount of time (in milliseconds) that a request should wait optimistically before
+                  succeeding or returning with a denied response.
    ident-fn     - a function of a request returning an opaque identifier by which to identify the
                   rate limiter. defaults to a global limit (shared by all clients) but you may set it to
                   ring-firewall-middleware.core/default-client-ident to implement a per-ip limit
@@ -234,146 +237,135 @@
    "
   ([handler]
    (wrap-rate-limit handler {}))
-  ([handler {:keys [max-requests period deny-handler ident-fn]
-             :or   {max-requests 100
+  ([handler {:keys [max-requests period deny-handler ident-fn max-wait]
+             :or   {max-requests 500
                     period       60000
                     ident-fn     (constantly :world)
-                    deny-handler default-limited-handler}}]
+                    deny-handler default-limited-handler
+                    max-wait     50}}]
    (let [striped (coord/weak-leaky-semaphore-factory max-requests period)]
      (fn rate-limit-handler
        ([request]
         (let [ident     (ident-fn request)
               semaphore ^Semaphore (striped ident)]
-          (if (.tryAcquire semaphore)
+          (if (.tryAcquire semaphore max-wait TimeUnit/MILLISECONDS)
             (handler request)
             (deny-handler request))))
        ([request respond raise]
         (let [ident     (ident-fn request)
               semaphore ^Semaphore (striped ident)]
-          (if (.tryAcquire semaphore)
+          (if (.tryAcquire semaphore max-wait TimeUnit/MILLISECONDS)
             (handler request respond raise)
             (deny-handler request respond raise))))))))
 
 
-(defn wrap-knock-knock
-  "Protects a ring handler against access until a secret knock is presented.
-   After the secret knock is satisfied access is granted for a configurable
-   amount of time to the client that presented the knock. Too many attempts
-   of the wrong knock will land you on the ban list for a longer period of
-   time and even correct knocks will be rejected."
-  ([handler {:keys [secret max-attempts access-period ban-period deny-handler]
-             :or   {secret        (str (UUID/randomUUID))
-                    max-attempts  5
-                    access-period 1800000                   ; 30 minutes
-                    ban-period    86400000                  ; 1 day
-                    deny-handler  default-forbidden-handler}}]
-   (let [state (atom {:allow-list #{} :deny-list #{} :demerits {}})]
-     (letfn [(successful-knock? [request]
-               (let [param (util/query-param request "knock")]
-                 (and (some? param) (util/secure= param secret))))
-             (unsuccessful-knock? [request]
-               (let [param (util/query-param request "knock")]
-                 (and (some? param) (not (util/secure= param secret)))))
-             (grant-access [state client-chain]
-               (-> state
-                   (update :allow-list conj client-chain)
-                   (update :demerits dissoc client-chain)))
-             (deny-access [state client-chain]
-               (let [demerit-count (inc (or (get-in state [:demerits client-chain]) 0))]
-                 (if (<= max-attempts demerit-count)
-                   (-> state
-                       (update :demerits dissoc client-chain)
-                       (update :deny-list conj client-chain))
-                   (-> state
-                       (update :demerits assoc client-chain demerit-count)))))
-             (banned? [old-state new-state client-chain]
-               (and (contains? (:deny-list new-state) client-chain)
-                    (not (contains? (:deny-list old-state) client-chain))))
-             (allow! [client-chain]
-               (swap! state grant-access client-chain)
-               (timer/schedule (+ (System/currentTimeMillis) access-period)
-                 (fn [] (swap! state update :allow-list disj client-chain))))
-             (deny! [client-chain]
-               (let [[old-state new-state] (swap-vals! state deny-access client-chain)]
-                 (when (banned? old-state new-state client-chain)
-                   (timer/schedule (+ (System/currentTimeMillis) ban-period)
-                     (fn [] (swap! state update :deny-list disj client-chain))))))]
-       (fn knock-knock-handler
-         ([request]
-          (let [{:keys [allow-list deny-list]} (deref state)
-                client-chain (cidr/client-ip-chain request)]
-            (cond
-              (cidr/client-denied? client-chain deny-list)
-              (deny-handler request)
-              (cidr/client-allowed? client-chain allow-list)
+(defn wrap-maintenance-throttle
+  "Middleware that coordinates requests to establish a maintenance mode when
+   requested. When maintenance throttle is enabled any new requests will block
+   but in-flight requests will be given a chance to finish prior to maintenance
+   activities beginning.
+
+   ident-fn     - a function of a request returning an opaque identifier by which to identify the
+                  request group that may be flipped into maintenance mode. useful if applying
+                  maintenance mode to one (of many) tenants at a time.
+   bypass-list  - a set of cidr ranges that are exempt from maintenance mode restrictions.
+                  useful if a set of administrators should still be able to use the site while
+                  maintenance mode is otherwise active.
+   "
+  ([handler]
+   (wrap-maintenance-throttle handler {}))
+  ([handler {:keys [ident-fn bypass-list]
+             :or   {ident-fn    (constantly :world)
+                    bypass-list #{}}}]
+
+   (fn maintenance-throttle-handler
+     ([request]
+      (let [bypassable   (util/touch bypass-list)
+            client-chain (cidr/client-ip-chain request)]
+        (if (cidr/client-allowed? client-chain bypassable)
+          (handler request)
+          (let [{:keys [lock phaser]} (main/get-state (ident-fn request))]
+            (when (some? lock) (deref lock))
+            (main/register-phaser phaser)
+            (try
               (handler request)
-              (successful-knock? request)
-              (do (allow! client-chain) (handler request))
-              (unsuccessful-knock? request)
-              (do (deny! client-chain) (deny-handler request))
-              :otherwise
-              (deny-handler request))))
-         ([request respond raise]
-          (let [{:keys [allow-list deny-list]} (deref state)
-                client-chain (cidr/client-ip-chain request)]
-            (cond
-              (cidr/client-denied? client-chain deny-list)
-              (deny-handler request respond raise)
-              (cidr/client-allowed? client-chain allow-list)
-              (handler request respond raise)
-              (successful-knock? request)
-              (do (allow! client-chain) (handler request respond raise))
-              (unsuccessful-knock? request)
-              (do (deny! client-chain) (deny-handler request respond raise))
-              :otherwise
-              (deny-handler request respond raise)))))))))
+              (finally
+                (main/deregister-phaser phaser)))))))
+
+     ([request respond raise]
+      (let [bypassable   (util/touch bypass-list)
+            client-chain (cidr/client-ip-chain request)]
+        (if (cidr/client-allowed? client-chain bypassable)
+          (handler request respond raise)
+          (let [{:keys [lock phaser]} (main/get-state (ident-fn request))]
+            (when (some? lock) (deref lock))
+            (main/register-phaser phaser)
+            (handler request
+                     (fn [response]
+                       (try (respond response)
+                            (finally (main/deregister-phaser phaser))))
+                     (fn [exception]
+                       (try (raise exception)
+                            (finally (main/deregister-phaser phaser))))))))))))
 
 
-(defn wrap-maintenance-mode
+(defn wrap-maintenance-limit
   "Middleware that coordinates requests to establish a maintenance mode when
    requested. When maintenance mode is enabled any new requests will be denied
    but in-flight requests will be given a chance to finish prior to maintenance
-   activities beginning."
+   activities beginning.
+
+   ident-fn     - a function of a request returning an opaque identifier by which to identify the
+                  request group that may be flipped into maintenance mode. useful if applying
+                  maintenance mode to one (of many) tenants at a time.
+   bypass-list  - a set of cidr ranges that are exempt from maintenance mode restrictions.
+                  useful if a set of administrators should still be able to access while
+                  maintenance mode is otherwise active.
+   deny-handler - a ring handler that should produce a response for requests that were denied due
+                  to being in maintenance mode.
+   max-wait     - the amount of time (in milliseconds) that a request should wait optimistically before
+                  succeeding or returning with a denied response.
+   "
   ([handler]
-   (wrap-maintenance-mode handler {}))
-  ([handler {:keys [ident-fn bypass-list deny-handler]
+   (wrap-maintenance-limit handler {}))
+  ([handler {:keys [ident-fn bypass-list deny-handler max-wait]
              :or   {ident-fn     (constantly :world)
                     deny-handler default-maintenance-handler
-                    bypass-list  #{}}}]
+                    bypass-list  #{}
+                    max-wait     50}}]
+
    (fn maintenance-limit-handler
      ([request]
-      (let [{:keys [lock phaser]} (main/get-state (ident-fn request))]
-        (if (and (some? lock) (= ::limited (deref lock 0 ::limited)))
-          (let [bypassable   (util/touch bypass-list)
-                client-chain (cidr/client-ip-chain request)]
-            (if (cidr/client-allowed? client-chain bypassable)
-              (handler request)
-              (deny-handler request)))
-          (do (main/register-phaser phaser)
-              (try
-                (handler request)
-                (finally
-                  (main/deregister-phaser phaser)))))))
+      (let [bypassable   (util/touch bypass-list)
+            client-chain (cidr/client-ip-chain request)]
+        (if (cidr/client-allowed? client-chain bypassable)
+          (handler request)
+          (let [{:keys [lock phaser]} (main/get-state (ident-fn request))]
+            (if (and (some? lock) (= ::limited (deref lock max-wait ::limited)))
+              (deny-handler request)
+              (do (main/register-phaser phaser)
+                  (try
+                    (handler request)
+                    (finally
+                      (main/deregister-phaser phaser)))))))))
+
      ([request respond raise]
-      (let [{:keys [lock phaser]} (main/get-state (ident-fn request))]
-        (if (and (some? lock) (= ::limited (deref lock 0 ::limited)))
-          (let [bypassable   (util/touch bypass-list)
-                client-chain (cidr/client-ip-chain request)]
-            (if (cidr/client-allowed? client-chain bypassable)
-              (handler request respond raise)
-              (deny-handler request respond raise)))
-          (do (main/register-phaser phaser)
-              (handler request
-                       (fn [response]
-                         (try
-                           (respond response)
-                           (finally
-                             (main/deregister-phaser phaser))))
-                       (fn [exception]
-                         (try
-                           (raise exception)
-                           (finally
-                             (main/deregister-phaser phaser))))))))))))
+      (let [bypassable   (util/touch bypass-list)
+            client-chain (cidr/client-ip-chain request)]
+        (if (cidr/client-allowed? client-chain bypassable)
+          (handler request respond raise)
+          (let [{:keys [lock phaser]} (main/get-state (ident-fn request))]
+            (if (and (some? lock) (= ::limited (deref lock max-wait ::limited)))
+              (deny-handler request respond raise)
+              (do (main/register-phaser phaser)
+                  (handler request
+                           (fn [response]
+                             (try (respond response)
+                                  (finally (main/deregister-phaser phaser))))
+                           (fn [exception]
+                             (try (raise exception)
+                                  (finally (main/deregister-phaser phaser))))))))))))))
+
 
 
 (defmacro with-maintenance-mode

@@ -23,7 +23,8 @@
 (defn exclusive-lock
   "Returns a map of {:lock (promise) :phaser (Phaser.)}. It's expected
    that the thread that obtains the lock will first await on the phaser,
-   then execute any exclusive necessary code, and"
+   then execute any exclusive necessary code, and finally unlock the lock
+   by delivering on the promise."
   [ident]
   (let [[old new] (swap-vals! STATE update ident assoc :lock (promise))]
     (some-> old (get-in [ident :lock]) (deref))
