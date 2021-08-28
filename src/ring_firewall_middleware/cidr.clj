@@ -1,8 +1,24 @@
 (ns ring-firewall-middleware.cidr
-  (:require [clojure.string :as strings]
-            [ring-firewall-middleware.utils :as util])
-  (:import [java.net InetAddress]))
+  (:require [clojure.string :as strings])
+  (:import [java.net InetAddress]
+           (clojure.lang IDeref)))
 
+(defn get-forwarded-ip-addresses
+  "Gets all the forwarded ip addresses from a request."
+  [request]
+  (letfn [(parse-header [header]
+            (if-some [value (get-in request [:headers header])]
+              (strings/split value #"\s*,\s*")
+              ()))
+          (strip-port [address]
+            (strings/replace address #":\d*$" ""))]
+    (->> ["x-forwarded-for" "X-Forwarded-For"]
+         (mapcat parse-header)
+         (remove strings/blank?)
+         (mapv strip-port))))
+
+(defn touch [x]
+  (if (instance? IDeref x) (deref x) x))
 
 (def public-ipv4-subnets
   #{"0.0.0.0/5"
@@ -104,13 +120,13 @@
 (defn client-ip-chain
   "Gets the set of IPs involved in the http request headers and source network packet."
   [request]
-  (into #{(:remote-addr request)} (util/get-forwarded-ip-addresses request)))
+  (into #{(:remote-addr request)} (get-forwarded-ip-addresses request)))
 
 (defn client-allowed?
   "Does the ring request satisfy the allow list? For a request to be allowed
    every ip address in the http header chain needs to be allowed."
   [client-chain allow-list]
-  (let [allow-list (util/touch allow-list)
+  (let [allow-list (touch allow-list)
         predicate  (partial in-cidr-ranges? (set (filter string? allow-list)))]
     (or (contains? (set allow-list) client-chain) (every? predicate client-chain))))
 
@@ -118,6 +134,6 @@
   "Does the ring request satisfy the deny list? For a request to be denied
    just one ip address in the http header chain needs to be denied."
   [client-chain deny-list]
-  (let [deny-list (util/touch deny-list)
+  (let [deny-list (touch deny-list)
         predicate (partial in-cidr-ranges? (set (filter string? deny-list)))]
     (or (contains? (set deny-list) client-chain) (not (empty? (filter predicate client-chain))))))

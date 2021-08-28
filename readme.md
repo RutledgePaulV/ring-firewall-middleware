@@ -166,7 +166,7 @@ error response from the server and will need to be retried by the client at a la
 
 This middleware adds request coordination so that you can enter and exit a "maintenance mode" from elsewhere in your
 code. When maintenance mode is active new requests are blocked and in-flight requests are awaited before executing the
-maintenance code. Optionally bypass maintenance mode for a specific set of IPs.
+maintenance code.
 
 ```clojure
 
@@ -177,7 +177,7 @@ maintenance code. Optionally bypass maintenance mode for a specific set of IPs.
   {:status 200 :body "My site is up!"})
 
 (def maintainable
-  (rfm/wrap-maintenance-throttle site-handler {:bypass-list #{"10.0.0.0/8"}}))
+  (rfm/wrap-maintenance-throttle site-handler))
 
 (jetty/run-jetty maintainable {:port 3000 :join? false})
 
@@ -195,7 +195,7 @@ maintenance code. Optionally bypass maintenance mode for a specific set of IPs.
 
 This middleware adds request coordination so that you can enter and exit a "maintenance mode" from elsewhere in your
 code. When maintenance mode is active new requests are denied and in-flight requests are awaited before executing the
-maintenance code. Optionally bypass maintenance mode for a specific set of IPs.
+maintenance code.
 
 ```clojure
 
@@ -206,7 +206,7 @@ maintenance code. Optionally bypass maintenance mode for a specific set of IPs.
   {:status 200 :body "My site is up!"})
 
 (def maintainable
-  (rfm/wrap-maintenance-limit site-handler {:bypass-list #{"10.0.0.0/8"}}))
+  (rfm/wrap-maintenance-limit site-handler))
 
 (jetty/run-jetty maintainable {:port 3000 :join? false})
 
