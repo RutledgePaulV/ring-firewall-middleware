@@ -1,9 +1,8 @@
 (ns ring-firewall-middleware.core
   (:require [ring-firewall-middleware.coordination :as coord]
-            [ring-firewall-middleware.cidr :as cidr]
-            [ring-firewall-middleware.utils :as util]
-            [ring-firewall-middleware.maintenance :as main])
-  (:import [java.util.concurrent Semaphore TimeUnit]))
+            [ring-firewall-middleware.cidr :as cidr])
+  (:import [java.util.concurrent Semaphore TimeUnit]
+           (java.util.concurrent.locks Lock ReentrantReadWriteLock)))
 
 
 (defn default-forbidden-handler
@@ -259,6 +258,16 @@
             (deny-handler request respond raise))))))))
 
 
+(defonce STATE (atom {}))
+
+(defn new-state []
+  (let [lock (ReentrantReadWriteLock.)]
+    {:read (.readLock lock) :write (.writeLock lock)}))
+
+(defn get-maintenance-state [ident]
+  (-> (swap! STATE update ident #(or % (new-state)))
+      (get ident)))
+
 (defn wrap-maintenance-throttle
   "Middleware that coordinates requests to establish a maintenance mode when
    requested. When maintenance throttle is enabled any new requests will block
@@ -268,45 +277,30 @@
    ident-fn     - a function of a request returning an opaque identifier by which to identify the
                   request group that may be flipped into maintenance mode. useful if applying
                   maintenance mode to one (of many) tenants at a time.
-   bypass-list  - a set of cidr ranges that are exempt from maintenance mode restrictions.
-                  useful if a set of administrators should still be able to use the site while
-                  maintenance mode is otherwise active.
    "
   ([handler]
    (wrap-maintenance-throttle handler {}))
-  ([handler {:keys [ident-fn bypass-list]
-             :or   {ident-fn    (constantly :world)
-                    bypass-list #{}}}]
+  ([handler {:keys [ident-fn]
+             :or   {ident-fn (constantly :world)}}]
 
    (fn maintenance-throttle-handler
      ([request]
-      (let [bypassable   (util/touch bypass-list)
-            client-chain (cidr/client-ip-chain request)]
-        (if (cidr/client-allowed? client-chain bypassable)
+      (let [{:keys [^Lock read]} (get-maintenance-state (ident-fn request))]
+        (try
+          (.lock read)
           (handler request)
-          (let [{:keys [lock phaser]} (main/get-state (ident-fn request))]
-            (when (some? lock) (deref lock))
-            (main/register-phaser phaser)
-            (try
-              (handler request)
-              (finally
-                (main/deregister-phaser phaser)))))))
+          (finally (.unlock read)))))
 
      ([request respond raise]
-      (let [bypassable   (util/touch bypass-list)
-            client-chain (cidr/client-ip-chain request)]
-        (if (cidr/client-allowed? client-chain bypassable)
-          (handler request respond raise)
-          (let [{:keys [lock phaser]} (main/get-state (ident-fn request))]
-            (when (some? lock) (deref lock))
-            (main/register-phaser phaser)
-            (handler request
-                     (fn [response]
-                       (try (respond response)
-                            (finally (main/deregister-phaser phaser))))
-                     (fn [exception]
-                       (try (raise exception)
-                            (finally (main/deregister-phaser phaser))))))))))))
+      (let [{:keys [^Lock read]} (get-maintenance-state (ident-fn request))]
+        (.lock read)
+        (handler request
+                 (fn [response]
+                   (try (respond response)
+                        (finally (.unlock read))))
+                 (fn [exception]
+                   (try (raise exception)
+                        (finally (.unlock read))))))))))
 
 
 (defn wrap-maintenance-limit
@@ -318,9 +312,6 @@
    ident-fn     - a function of a request returning an opaque identifier by which to identify the
                   request group that may be flipped into maintenance mode. useful if applying
                   maintenance mode to one (of many) tenants at a time.
-   bypass-list  - a set of cidr ranges that are exempt from maintenance mode restrictions.
-                  useful if a set of administrators should still be able to access while
-                  maintenance mode is otherwise active.
    deny-handler - a ring handler that should produce a response for requests that were denied due
                   to being in maintenance mode.
    max-wait     - the amount of time (in milliseconds) that a request should wait optimistically before
@@ -328,43 +319,31 @@
    "
   ([handler]
    (wrap-maintenance-limit handler {}))
-  ([handler {:keys [ident-fn bypass-list deny-handler max-wait]
+  ([handler {:keys [ident-fn deny-handler max-wait]
              :or   {ident-fn     (constantly :world)
                     deny-handler default-maintenance-handler
-                    bypass-list  #{}
                     max-wait     50}}]
 
    (fn maintenance-limit-handler
      ([request]
-      (let [bypassable   (util/touch bypass-list)
-            client-chain (cidr/client-ip-chain request)]
-        (if (cidr/client-allowed? client-chain bypassable)
-          (handler request)
-          (let [{:keys [lock phaser]} (main/get-state (ident-fn request))]
-            (if (and (some? lock) (= ::limited (deref lock max-wait ::limited)))
-              (deny-handler request)
-              (do (main/register-phaser phaser)
-                  (try
-                    (handler request)
-                    (finally
-                      (main/deregister-phaser phaser)))))))))
+      (let [{:keys [^Lock read]} (get-maintenance-state (ident-fn request))]
+        (if (.tryLock read max-wait TimeUnit/MILLISECONDS)
+          (try
+            (handler request)
+            (finally (.unlock read)))
+          (deny-handler request))))
 
      ([request respond raise]
-      (let [bypassable   (util/touch bypass-list)
-            client-chain (cidr/client-ip-chain request)]
-        (if (cidr/client-allowed? client-chain bypassable)
-          (handler request respond raise)
-          (let [{:keys [lock phaser]} (main/get-state (ident-fn request))]
-            (if (and (some? lock) (= ::limited (deref lock max-wait ::limited)))
-              (deny-handler request respond raise)
-              (do (main/register-phaser phaser)
-                  (handler request
-                           (fn [response]
-                             (try (respond response)
-                                  (finally (main/deregister-phaser phaser))))
-                           (fn [exception]
-                             (try (raise exception)
-                                  (finally (main/deregister-phaser phaser))))))))))))))
+      (let [{:keys [^Lock read]} (get-maintenance-state (ident-fn request))]
+        (if (.tryLock read max-wait TimeUnit/MILLISECONDS)
+          (handler request
+                   (fn [response]
+                     (try (respond response)
+                          (finally (.unlock read))))
+                   (fn [exception]
+                     (try (raise exception)
+                          (finally (.unlock read)))))
+          (deny-handler request respond raise)))))))
 
 
 
@@ -373,9 +352,9 @@
    executes body after all in-flight requests have
    completed."
   [ident & body]
-  `(let [state# (main/exclusive-lock ~ident)]
+  `(let [^Lock lock# (:write (get-maintenance-state ~ident))]
      (try
-       (main/await-phaser (:phaser state#))
+       (.lock lock#)
        ~@body
        (finally
-         (main/release-lock (:lock state#))))))
+         (.unlock lock#)))))
