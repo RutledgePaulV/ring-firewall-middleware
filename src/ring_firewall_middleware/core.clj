@@ -66,7 +66,7 @@
 
 (defn wrap-deny-ips
   "Protect a ring handler with source ip authentication. Your deny-list ranges must cover
-   any forbidden clients / proxy servers. The default deny-list ranges cover the entire internal
+   any forbidden clients / proxy servers. The default deny-list ranges cover the entire
    public network space.
 
    deny-list    - cidr ranges collection that, if matched, will result in a denied request. optionally

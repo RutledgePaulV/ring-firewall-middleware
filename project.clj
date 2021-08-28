@@ -24,7 +24,7 @@
   [["releases" :clojars] ["snapshots" :clojars]]
 
   :dependencies
-  [[org.clojure/clojure "1.10.1"]]
+  [[org.clojure/clojure "1.10.3"]]
 
   :repl-options
   {:init-ns ring-firewall-middleware.core})
