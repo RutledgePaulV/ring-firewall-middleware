@@ -3,7 +3,8 @@
   (:import [clojure.lang IMeta]
            [java.lang.ref WeakReference ReferenceQueue]
            [java.util.concurrent ConcurrentHashMap Semaphore]
-           [java.util.function Function]))
+           [java.util.function Function]
+           (java.util.concurrent.locks ReentrantReadWriteLock)))
 
 (defn weakly-memoize
   ([f] (weakly-memoize f identity))
@@ -25,7 +26,7 @@
          (.get ^WeakReference ref))))))
 
 (defn weak-semaphore-factory [permits]
-  (weakly-memoize (fn [k] (Semaphore. (int permits) true))))
+  (weakly-memoize (fn [_] (Semaphore. (int permits) true))))
 
 (defn leaky-semaphore [permits period]
   (let [semaphore (Semaphore. permits true)
@@ -42,3 +43,6 @@
 
 (defn weak-leaky-semaphore-factory [max-requests period]
   (weakly-memoize (fn [_] (leaky-semaphore max-requests period))))
+
+(defn weak-read-write-factory []
+  (weakly-memoize (fn [_] (ReentrantReadWriteLock.))))

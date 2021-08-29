@@ -2,7 +2,7 @@
   (:require [ring-firewall-middleware.coordination :as coord]
             [ring-firewall-middleware.cidr :as cidr])
   (:import [java.util.concurrent Semaphore TimeUnit]
-           (java.util.concurrent.locks Lock ReentrantReadWriteLock)))
+           (java.util.concurrent.locks ReadWriteLock)))
 
 
 (defn default-forbidden-handler
@@ -258,15 +258,8 @@
             (deny-handler request respond raise))))))))
 
 
-(defonce STATE (atom {}))
-
-(defn new-state []
-  (let [lock (ReentrantReadWriteLock.)]
-    {:read (.readLock lock) :write (.writeLock lock)}))
-
-(defn get-maintenance-state [ident]
-  (-> (swap! STATE update ident #(or % (new-state)))
-      (get ident)))
+(defonce maintenance-factory
+  (coord/weak-read-write-factory))
 
 (defn wrap-maintenance-throttle
   "Middleware that coordinates requests to establish a maintenance mode when
@@ -285,22 +278,22 @@
 
    (fn maintenance-throttle-handler
      ([request]
-      (let [{:keys [^Lock read]} (get-maintenance-state (ident-fn request))]
+      (let [^ReadWriteLock lock (maintenance-factory (ident-fn request))]
         (try
-          (.lock read)
+          (.lock (.readLock lock))
           (handler request)
-          (finally (.unlock read)))))
+          (finally (.unlock (.readLock lock))))))
 
      ([request respond raise]
-      (let [{:keys [^Lock read]} (get-maintenance-state (ident-fn request))]
-        (.lock read)
+      (let [^ReadWriteLock lock (maintenance-factory (ident-fn request))]
+        (.lock (.readLock lock))
         (handler request
                  (fn [response]
                    (try (respond response)
-                        (finally (.unlock read))))
+                        (finally (.unlock (.readLock lock)))))
                  (fn [exception]
                    (try (raise exception)
-                        (finally (.unlock read))))))))))
+                        (finally (.unlock (.readLock lock)))))))))))
 
 
 (defn wrap-maintenance-limit
@@ -326,23 +319,23 @@
 
    (fn maintenance-limit-handler
      ([request]
-      (let [{:keys [^Lock read]} (get-maintenance-state (ident-fn request))]
-        (if (.tryLock read max-wait TimeUnit/MILLISECONDS)
+      (let [^ReadWriteLock lock (maintenance-factory (ident-fn request))]
+        (if (.tryLock (.readLock lock) max-wait TimeUnit/MILLISECONDS)
           (try
             (handler request)
-            (finally (.unlock read)))
+            (finally (.unlock (.readLock lock))))
           (deny-handler request))))
 
      ([request respond raise]
-      (let [{:keys [^Lock read]} (get-maintenance-state (ident-fn request))]
-        (if (.tryLock read max-wait TimeUnit/MILLISECONDS)
+      (let [^ReadWriteLock lock (maintenance-factory (ident-fn request))]
+        (if (.tryLock (.readLock lock) max-wait TimeUnit/MILLISECONDS)
           (handler request
                    (fn [response]
                      (try (respond response)
-                          (finally (.unlock read))))
+                          (finally (.unlock (.readLock lock)))))
                    (fn [exception]
                      (try (raise exception)
-                          (finally (.unlock read)))))
+                          (finally (.unlock (.readLock lock))))))
           (deny-handler request respond raise)))))))
 
 
@@ -352,9 +345,9 @@
    executes body after all in-flight requests have
    completed."
   [ident & body]
-  `(let [^Lock lock# (:write (get-maintenance-state ~ident))]
+  `(let [^ReadWriteLock lock# (maintenance-factory ~ident)]
      (try
-       (.lock lock#)
+       (.lock (.writeLock lock#))
        ~@body
        (finally
-         (.unlock lock#)))))
+         (.unlock (.writeLock lock#))))))
